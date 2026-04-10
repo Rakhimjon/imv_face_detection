@@ -1,9 +1,10 @@
-import 'package:face_imv/presentation/pages/myid_verification_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:face_imv/application/camera_state.dart';
 import 'package:face_imv/application/face_detection_state.dart';
 import 'package:face_imv/injection.dart';
+import 'package:face_imv/presentation/core/app_colors.dart';
+import 'package:face_imv/presentation/pages/splash_page.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 void main() async {
@@ -26,7 +27,11 @@ class FaceAnalyzerApp extends StatelessWidget {
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             brightness: Brightness.dark,
-            primarySwatch: Colors.indigo,
+            scaffoldBackgroundColor: AppColors.background,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: AppColors.primary,
+              brightness: Brightness.dark,
+            ),
             useMaterial3: true,
           ),
           home: MultiBlocProvider(
@@ -36,7 +41,7 @@ class FaceAnalyzerApp extends StatelessWidget {
               ),
               BlocProvider(create: (context) => getIt<FaceDetectionCubit>()),
             ],
-            child: const MyIdVerificationPage(),
+            child: const SplashPage(),
           ),
         );
       },
