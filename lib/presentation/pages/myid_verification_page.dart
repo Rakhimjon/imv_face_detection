@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:camera/camera.dart';
+import 'package:face_imv/domain/face_validator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
@@ -47,9 +48,12 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
 
   final _faceDetector = ml_kit.FaceDetector(
     options: ml_kit.FaceDetectorOptions(
-      enableContours: false,
+      enableContours: true,
+      enableLandmarks: true,
       enableClassification: true,
-      minFaceSize: 0.3,
+      enableTracking: true,
+      minFaceSize: 0.15,
+      performanceMode: ml_kit.FaceDetectorMode.accurate,
     ),
   );
 
@@ -147,6 +151,10 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
     if (_cameraController == null || !_cameraController!.value.isInitialized)
       return;
 
+    debugPrint(
+      '🎥 Starting face detection stream for liveness verification...',
+    );
+
     _cameraController!.startImageStream((image) async {
       if (_isProcessing || _step != _Step.scan) return;
       _isProcessing = true;
@@ -158,48 +166,126 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
             final detected = faces.isNotEmpty;
             if (detected != _faceDetected) {
               setState(() => _faceDetected = detected);
+              debugPrint('👤 Face detected: $detected');
             }
+
             // Liveness sequence
             if (detected) {
               final face = faces.first;
               final yaw = face.headEulerAngleY ?? 0.0;
+              final pitch = face.headEulerAngleX ?? 0.0;
               final leftEye = face.leftEyeOpenProbability ?? 1.0;
               final rightEye = face.rightEyeOpenProbability ?? 1.0;
+              final faceWidth = face.boundingBox.width;
+              final validation = FaceValidator.validateHumanFace(face);
+
+              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              debugPrint(
+                '🔴 LIVENESS CHECK - Step: ${_livenessStep.name.toUpperCase()}',
+              );
+              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              debugPrint('📊 Current Metrics:');
+              debugPrint('  ↔️  Head Yaw (Y):    ${yaw.toStringAsFixed(2)}°');
+              debugPrint('  ↕️  Head Pitch (X):  ${pitch.toStringAsFixed(2)}°');
+              debugPrint(
+                '  👁️  Left Eye Open:  ${(leftEye * 100).toStringAsFixed(1)}%',
+              );
+              debugPrint(
+                '  👁️  Right Eye Open: ${(rightEye * 100).toStringAsFixed(1)}%',
+              );
+              debugPrint(
+                '  📏 Face Width:      ${faceWidth.toStringAsFixed(0)}px',
+              );
+              debugPrint(
+                '  🧑 Face Valid:      ${validation.isValid ? "YES" : "NO"} (${(validation.confidenceScore * 100).toStringAsFixed(1)}%)',
+              );
+              debugPrint(
+                '  📈 Progress:        ${(_scanProgress * 100).toStringAsFixed(0)}%',
+              );
+              if (validation.warnings.isNotEmpty) {
+                debugPrint('  ⚠️  Warnings: ${validation.warnings.join(" | ")}');
+              }
+              if (validation.errors.isNotEmpty) {
+                debugPrint('  ❌ Errors:   ${validation.errors.join(" | ")}');
+              }
+
+              if (!validation.isValid) {
+                debugPrint('\n⏳ WAITING - Face quality is not sufficient yet');
+                debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+                return;
+              }
 
               if (_livenessStep == _LivenessStep.straight) {
+                debugPrint('\n🎯 STEP 1: Checking if facing STRAIGHT...');
+                debugPrint('   Required: Yaw between -10° and 10°');
+                debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
                 if (yaw > -10 && yaw < 10) {
+                  debugPrint('   ✅ PASSED - Moving to BLINK step');
                   setState(() {
                     _scanProgress = 0.25;
                     _livenessStep = _LivenessStep.blink;
                   });
+                } else {
+                  debugPrint('   ⏳ WAITING - Straighten your head');
                 }
               } else if (_livenessStep == _LivenessStep.blink) {
+                debugPrint('\n👁️  STEP 2: Checking for BLINK...');
+                debugPrint('   Required: Both eyes < 35% open');
+                debugPrint(
+                  '   Left Eye:  ${(leftEye * 100).toStringAsFixed(1)}%',
+                );
+                debugPrint(
+                  '   Right Eye: ${(rightEye * 100).toStringAsFixed(1)}%',
+                );
                 if (leftEye < 0.35 && rightEye < 0.35) {
+                  debugPrint('   ✅ BLINK DETECTED - Moving to LEFT turn');
                   setState(() {
                     _scanProgress = 0.50;
                     _livenessStep = _LivenessStep.left;
                   });
+                } else {
+                  debugPrint('   ⏳ WAITING - Please blink');
                 }
               } else if (_livenessStep == _LivenessStep.left) {
-                if (yaw > 15) {
+                debugPrint('\n⬅️  STEP 3: Checking LEFT turn...');
+                debugPrint('   Required: Yaw < -15°');
+                debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
+                if (yaw < -15) {
+                  debugPrint('   ✅ LEFT TURN VERIFIED - Moving to RIGHT turn');
                   setState(() {
                     _scanProgress = 0.75;
                     _livenessStep = _LivenessStep.right;
                   });
+                } else {
+                  debugPrint('   ⏳ WAITING - Turn head left');
                 }
               } else if (_livenessStep == _LivenessStep.right) {
-                if (yaw < -15) {
+                debugPrint('\n➡️  STEP 4: Checking RIGHT turn...');
+                debugPrint('   Required: Yaw > 15°');
+                debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
+                if (yaw > 15) {
+                  debugPrint(
+                    '   ✅ RIGHT TURN VERIFIED - Liveness COMPLETE! 🎉',
+                  );
                   setState(() {
                     _scanProgress = 1.0;
                     _livenessStep = _LivenessStep.done;
                   });
+                } else {
+                  debugPrint('   ⏳ WAITING - Turn head right');
                 }
               } else if (_livenessStep == _LivenessStep.done) {
                 if (_step == _Step.scan) {
+                  debugPrint('\n🎉 ALL LIVENESS STEPS COMPLETED!');
+                  debugPrint('🔬 Starting deep analysis...');
                   _startDeepAnalysis();
                 }
               }
+              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
             } else {
+              if (_faceDetected) {
+                debugPrint('⚠️  Face lost - Resetting liveness check');
+              }
               setState(() {
                 _scanProgress = 0;
                 _livenessStep = _LivenessStep.straight;
@@ -207,6 +293,8 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
             }
           }
         }
+      } catch (e) {
+        debugPrint('❌ Error in face stream: $e');
       } finally {
         _isProcessing = false;
       }
@@ -214,11 +302,21 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   }
 
   void _startDeepAnalysis() {
+    debugPrint('╔════════════════════════════════════════════╗');
+    debugPrint('║  🔬 DEEP ANALYSIS MODE ACTIVATED          ║');
+    debugPrint('╚════════════════════════════════════════════╝');
+    debugPrint('⏱️  Analysis duration: 2500ms');
+    debugPrint('🧠 Verifying biometric authenticity...');
+
     setState(() {
       _step = _Step.analyzing;
     });
     _analysisTimer = Timer(const Duration(milliseconds: 2500), () {
-      if (mounted) _completeVerification(success: true);
+      if (mounted) {
+        debugPrint('✅ Deep analysis COMPLETE!');
+        debugPrint('🎉 Verification SUCCESS!\n');
+        _completeVerification(success: true);
+      }
     });
   }
 

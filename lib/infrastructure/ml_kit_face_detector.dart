@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import 'package:fpdart/fpdart.dart';
 import 'package:face_imv/domain/face_entity.dart';
 import 'package:face_imv/domain/i_face_detector.dart';
@@ -41,11 +42,142 @@ class MLKitFaceDetector implements IFaceDetector {
   ) async {
     try {
       final faces = await _detector.processImage(inputImage);
+
+      // 🔍 DEBUG LOGGING - Face Detection Results
+      if (kDebugMode) {
+        debugPrint('═══════════════════════════════════════════════');
+        debugPrint('🎯 FACE DETECTION ANALYSIS');
+        debugPrint('═══════════════════════════════════════════════');
+        debugPrint('📊 Faces detected: ${faces.length}');
+
+        for (var i = 0; i < faces.length; i++) {
+          final face = faces[i];
+          debugPrint('\n👤 Face #${i + 1}:');
+          debugPrint('  📏 Bounding Box: ${face.boundingBox}');
+          debugPrint('  🎭 Tracking ID: ${face.trackingId ?? "N/A"}');
+
+          // Head Rotation Analysis
+          debugPrint('\n  🔄 HEAD ROTATION (Euler Angles):');
+          final pitch = face.headEulerAngleX ?? 0.0;
+          final yaw = face.headEulerAngleY ?? 0.0;
+          final roll = face.headEulerAngleZ ?? 0.0;
+          debugPrint(
+            '    ↕️  Pitch (X): ${pitch.toStringAsFixed(2)}° ${_getPitchDirection(pitch)}',
+          );
+          debugPrint(
+            '    ↔️  Yaw (Y):   ${yaw.toStringAsFixed(2)}° ${_getYawDirection(yaw)}',
+          );
+          debugPrint(
+            '    🔃 Roll (Z):  ${roll.toStringAsFixed(2)}° ${_getRollDirection(roll)}',
+          );
+
+          // Eye & Smile Detection
+          debugPrint('\n  😊 FACIAL EXPRESSIONS:');
+          final leftEye = face.leftEyeOpenProbability ?? 0.0;
+          final rightEye = face.rightEyeOpenProbability ?? 0.0;
+          final smile = face.smilingProbability ?? 0.0;
+          debugPrint(
+            '    👁️  Left Eye:  ${(leftEye * 100).toStringAsFixed(1)}% ${leftEye > 0.7
+                ? "OPEN ✅"
+                : leftEye < 0.3
+                ? "CLOSED ❌"
+                : "PARTIAL 👀"}',
+          );
+          debugPrint(
+            '    👁️  Right Eye: ${(rightEye * 100).toStringAsFixed(1)}% ${rightEye > 0.7
+                ? "OPEN ✅"
+                : rightEye < 0.3
+                ? "CLOSED ❌"
+                : "PARTIAL 👀"}',
+          );
+          debugPrint(
+            '    😄 Smile:     ${(smile * 100).toStringAsFixed(1)}% ${smile > 0.7 ? "SMILING 😊" : "NEUTRAL 😐"}',
+          );
+
+          // Face Quality Checks
+          debugPrint('\n  ✅ FACE QUALITY VALIDATION:');
+          final faceSize = face.boundingBox.width;
+          debugPrint(
+            '    📐 Face Width: ${faceSize.toStringAsFixed(0)}px ${_getFaceSizeQuality(faceSize)}',
+          );
+          debugPrint(
+            '    🎯 Position: ${_isHeadCentered(yaw, pitch) ? "CENTERED ✅" : "OFF-CENTER ⚠️"}',
+          );
+          debugPrint(
+            '    👁️  Blink Detection: ${leftEye < 0.35 && rightEye < 0.35 ? "BLINKING 👀" : "EYES OPEN ✅"}',
+          );
+          debugPrint(
+            '    🧑 Human Face: ${_isHumanFace(face) ? "VERIFIED ✅" : "UNCERTAIN ⚠️"}',
+          );
+
+          // Landmarks
+          if (face.landmarks.isNotEmpty) {
+            debugPrint('\n  📍 LANDMARKS DETECTED: ${face.landmarks.length}');
+            for (final landmark in face.landmarks.values) {
+              if (landmark != null) {
+                debugPrint(
+                  '    - ${landmark.type.name}: (${landmark.position.x.toInt()}, ${landmark.position.y.toInt()})',
+                );
+              }
+            }
+          }
+
+          // Contours
+          if (face.contours.isNotEmpty) {
+            debugPrint('  🎨 CONTOURS DETECTED: ${face.contours.length}');
+          }
+        }
+
+        debugPrint('═══════════════════════════════════════════════\n');
+      }
+
       final entities = faces.map(_mapToEntity).toList();
       return Right(entities);
-    } catch (e, stackTrace) {
+    } catch (e) {
+      debugPrint('❌ ML Kit Detection Error: $e');
       return Left('ML Kit Detection Error: $e');
     }
+  }
+
+  // Helper methods for debug analysis
+  String _getPitchDirection(double pitch) {
+    if (pitch < -15) return '(Looking DOWN ⬇️)';
+    if (pitch > 15) return '(Looking UP ⬆️)';
+    return '(Looking STRAIGHT 👁️)';
+  }
+
+  String _getYawDirection(double yaw) {
+    if (yaw < -20) return '(Turning LEFT ⬅️)';
+    if (yaw > 20) return '(Turning RIGHT ➡️)';
+    return '(Facing CENTER 🎯)';
+  }
+
+  String _getRollDirection(double roll) {
+    if (roll.abs() < 10) return '(Head STRAIGHT 📏)';
+    return '(Head TILTED 🔄)';
+  }
+
+  String _getFaceSizeQuality(double width) {
+    if (width > 280) return '(TOO CLOSE 🔴 - Move back)';
+    if (width < 100) return '(TOO FAR 🟡 - Move closer)';
+    return '(PERFECT DISTANCE 🟢)';
+  }
+
+  bool _isHeadCentered(double yaw, double pitch) {
+    return yaw.abs() < 15 && pitch.abs() < 15;
+  }
+
+  bool _isHumanFace(ml_kit.Face face) {
+    // Validate that detected face has human characteristics
+    final hasValidSize =
+        face.boundingBox.width > 50 && face.boundingBox.height > 50;
+    final hasEyeData =
+        face.leftEyeOpenProbability != null &&
+        face.rightEyeOpenProbability != null;
+    final hasValidRotation =
+        face.headEulerAngleY != null && face.headEulerAngleX != null;
+
+    return hasValidSize && hasEyeData && hasValidRotation;
   }
 
   FaceEntity _mapToEntity(ml_kit.Face face) {
@@ -111,8 +243,6 @@ class MLKitFaceDetector implements IFaceDetector {
         return FaceLandmarkType.rightEye;
       case ml_kit.FaceLandmarkType.rightMouth:
         return FaceLandmarkType.rightMouth;
-      default:
-        return null;
     }
   }
 
@@ -148,8 +278,6 @@ class MLKitFaceDetector implements IFaceDetector {
         return FaceContourType.upperLipBottom;
       case ml_kit.FaceContourType.upperLipTop:
         return FaceContourType.upperLipTop;
-      default:
-        return null;
     }
   }
 
