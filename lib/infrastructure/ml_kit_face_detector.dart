@@ -44,8 +44,6 @@ class MLKitFaceDetector implements IFaceDetector {
       final entities = faces.map(_mapToEntity).toList();
       return Right(entities);
     } catch (e, stackTrace) {
-      // ignore: avoid_print
-      print('ML Kit Detection Error: $e\n$stackTrace');
       return Left('ML Kit Detection Error: $e');
     }
   }

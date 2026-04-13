@@ -446,7 +446,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
               borderRadius: BorderRadius.circular(8.r),
             ),
             child: Text(
-              'MY',
+              'IMV',
               style: TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.w900,
@@ -681,14 +681,12 @@ class _ScanStep extends StatelessWidget {
                 ),
               ),
 
-              // ── Tips ──
               Padding(
                 padding: EdgeInsets.symmetric(horizontal: 32.w),
                 child: _ScanTips(),
               ),
               SizedBox(height: 24.h),
 
-              // ── Cancel button ──
               TextButton(
                 onPressed: onCancel,
                 child: Text(

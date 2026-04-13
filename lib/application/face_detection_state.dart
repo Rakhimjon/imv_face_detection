@@ -10,7 +10,7 @@ part 'face_detection_state.freezed.dart';
 @freezed
 abstract class FaceDetectionState with _$FaceDetectionState {
   const factory FaceDetectionState({
-    @Default(BlocStatus.initial) BlocStatus status,
+    @Default(BlocStatus()) BlocStatus status,
     @Default([]) List<FaceEntity> faces,
   }) = _FaceDetectionState;
 }
@@ -18,18 +18,16 @@ abstract class FaceDetectionState with _$FaceDetectionState {
 class FaceDetectionCubit extends Cubit<FaceDetectionState> {
   final IFaceDetector _faceDetector;
 
-  FaceDetectionCubit(this._faceDetector) : super(const FaceDetectionState());
+  FaceDetectionCubit(this._faceDetector) : super( FaceDetectionState());
 
   Future<void> processImage(ml_kit.InputImage inputImage) async {
-    // We don't want to emit 'loading' on every frame for real-time detection
-    // to avoid UI flicker, but we use 'initial' for the very first load.
     
     final result = await _faceDetector.detectFromInputImage(inputImage);
 
     result.fold(
       (error) => emit(state.copyWith(status: BlocStatus.fail(error))),
       (faces) => emit(state.copyWith(
-        status: BlocStatus.success,
+        status: BlocStatus.success(),
         faces: faces,
       )),
     );

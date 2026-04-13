@@ -207,7 +207,7 @@ return $default(_that.status,_that.faces);case _:
 
 
 class _FaceDetectionState implements FaceDetectionState {
-  const _FaceDetectionState({this.status = BlocStatus.initial, final  List<FaceEntity> faces = const []}): _faces = faces;
+  const _FaceDetectionState({this.status = const BlocStatus(), final  List<FaceEntity> faces = const []}): _faces = faces;
   
 
 @override@JsonKey() final  BlocStatus status;

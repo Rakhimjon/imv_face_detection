@@ -9,7 +9,7 @@ part 'camera_state.freezed.dart';
 @freezed
 abstract class CameraState with _$CameraState {
   const factory CameraState({
-    @Default(BlocStatus.initial) BlocStatus status,
+    @Default(BlocStatus()) BlocStatus status,
     CameraController? controller,
     @Default(CameraLensDirection.front) CameraLensDirection selectedDirection,
   }) = _CameraState;
@@ -22,7 +22,7 @@ class CameraCubit extends Cubit<CameraState> {
     // Release previous controller if any
     await stopCamera();
     
-    emit(state.copyWith(status: BlocStatus.loading));
+    emit(state.copyWith(status: BlocStatus.loading()));
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
@@ -46,7 +46,7 @@ class CameraCubit extends Cubit<CameraState> {
 
       await controller.initialize();
       emit(state.copyWith(
-        status: BlocStatus.success,
+        status: BlocStatus.success(),
         controller: controller,
       ));
     } catch (e) {

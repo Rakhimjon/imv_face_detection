@@ -208,7 +208,7 @@ return $default(_that.status,_that.controller,_that.selectedDirection);case _:
 
 
 class _CameraState implements CameraState {
-  const _CameraState({this.status = BlocStatus.initial, this.controller, this.selectedDirection = CameraLensDirection.front});
+  const _CameraState({this.status = const BlocStatus(), this.controller, this.selectedDirection = CameraLensDirection.front});
   
 
 @override@JsonKey() final  BlocStatus status;
