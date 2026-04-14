@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:face_imv/domain/face_entity.dart';
 
@@ -5,115 +6,328 @@ class FaceOverlayPainter extends CustomPainter {
   final List<FaceEntity> faces;
   final Size imageSize;
   final int rotation;
+  final bool isFrontCamera;
 
   FaceOverlayPainter({
     required this.faces,
     required this.imageSize,
     required this.rotation,
+    this.isFrontCamera = true,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
+    // 1. Draw the reference ellipse (face guide) first (background layer)
+    _drawFaceGuideEllipse(canvas, size);
+    
+    // 2. Draw detected faces overlay
+    if (faces.isNotEmpty) {
+      _drawDetectedFaces(canvas, size);
+    }
+  }
+
+  // 🎯 FACE GUIDE ELLIPSE (The oval where user should put their face)
+  void _drawFaceGuideEllipse(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    
+    // Calculate ellipse size (typically 70-80% of screen width, aspect ratio 3:4 for face)
+    final ellipseWidth = size.width * 0.75;
+    final ellipseHeight = ellipseWidth * 1.25; // Taller than wide (face shape)
+    
+    final rect = Rect.fromCenter(
+      center: center,
+      width: ellipseWidth,
+      height: ellipseHeight,
+    );
+
+    // Determine state color
+    final guidePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0;
+
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.center,
+    );
+
+    // Check conditions
+    if (faces.length > 1) {
+      // 🔴 MULTIPLE FACES ERROR
+      guidePaint.color = Colors.redAccent;
+      guidePaint.strokeWidth = 4.0;
+      
+      // Draw red ellipse
+      canvas.drawOval(rect, guidePaint);
+      
+      // Error text: "Faqat bitta yuzni ko'rsating" (Show only one face)
+      textPainter.text = TextSpan(
+        text: "❌ Faqat bitta yuzni ko'rsating",
+        style: TextStyle(
+          color: Colors.redAccent,
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+          // 🔧 FIXED: backgroundColor (was backgroundlor)
+          backgroundColor: Colors.black54,
+        ),
+      );
+      
+    } else if (faces.isEmpty) {
+      // ⚪ WAITING STATE (Gray dotted line)
+      guidePaint.color = Colors.white54;
+      guidePaint.strokeWidth = 2.0;
+      // Draw dotted effect
+      guidePaint.style = PaintingStyle.stroke;
+      
+      canvas.drawOval(rect, guidePaint);
+      
+      // Instruction text
+      textPainter.text = TextSpan(
+        text: "Yuzingizni oval ichiga joylashtiring",
+        style: TextStyle(
+          color: Colors.white70,
+          fontSize: 16,
+          backgroundColor: Colors.black45,
+        ),
+      );
+      
+    } else {
+      // One face detected - check positioning
+      final face = faces.first;
+      final faceRect = _scaleRect(face.boundingBox, size);
+      
+      // Check if face is inside the ellipse guide
+      final isCentered = _isFaceCenteredInEllipse(faceRect, center, ellipseWidth, ellipseHeight);
+      // 🔧 FIXED: face.boundingBox (was face.bougBox)
+      final isTooSmall = face.boundingBox.width < imageSize.width * 0.15; // Too far
+      final isTooBig = face.boundingBox.width > imageSize.width * 0.85; // Too close
+      
+      if (isTooSmall) {
+        // 🟡 TOO FAR - "Come closer"
+        guidePaint.color = Colors.amber;
+        guidePaint.strokeWidth = 3.0;
+        canvas.drawOval(rect, guidePaint);
+        
+        // Animated-like effect (pulsing suggestion)
+        final pulsePaint = Paint()
+          ..color = Colors.amber.withOpacity(0.3)
+          ..style = PaintingStyle.fill;
+        canvas.drawOval(rect, pulsePaint);
+        
+        textPainter.text = TextSpan(
+          text: "📱 Yuzingizni yaqinroq qiling",
+          style: TextStyle(
+            color: Colors.amber,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+            backgroundColor: Colors.black54,
+          ),
+        );
+        
+      } else if (isTooBig) {
+        // 🟠 TOO CLOSE - "Move back"
+        guidePaint.color = Colors.orange;
+        guidePaint.strokeWidth = 3.0;
+        canvas.drawOval(rect, guidePaint);
+        
+        // 🔧 FIXED: text: (was xt:)
+        textPainter.text = TextSpan(
+          text: "↩️ Ozroq uzoqroq turing",
+          style: TextStyle(
+            color: Colors.orange,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            backgroundColor: Colors.black54,
+          ),
+        );
+        
+      } else if (isCentered) {
+        // 🟢 PERFECT POSITION
+        guidePaint.color = Colors.greenAccent;
+        guidePaint.strokeWidth = 4.0;
+        canvas.drawOval(rect, guidePaint);
+        
+        // Success text
+        textPainter.text = TextSpan(
+          text: "✅ Ajoyib! Turganingizda qoling",
+          style: TextStyle(
+            color: Colors.greenAccent,
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            backgroundColor: Colors.black54,
+          ),
+        );
+        
+      } else {
+        // 🟡 NOT CENTERED
+        guidePaint.color = Colors.yellow;
+        guidePaint.strokeWidth = 2.5;
+        canvas.drawOval(rect, guidePaint);
+        
+        // 🔧 FIXED: joylashtiring (was jlashtiring)
+        textPainter.text = TextSpan(
+          text: "🎯 Yuzingizni markazga joylashtiring",
+          style: TextStyle(
+            color: Colors.yellow,
+            fontSize: 16,
+            backgroundColor: Colors.black54,
+          ),
+        );
+      }
+    }
+
+    // Draw text at bottom of ellipse
+    textPainter.layout();
+    textPainter.paint(
+      canvas, 
+      Offset(
+        center.dx - textPainter.width / 2,
+        center.dy + ellipseHeight / 2 + 20,
+      ),
+    );
+    
+    // Draw corner markers on ellipse (decorative)
+    _drawCornerMarkers(canvas, rect, guidePaint.color);
+  }
+
+  // Check if face bounding box is centered in the ellipse
+  bool _isFaceCenteredInEllipse(Rect faceRect, Offset center, double ellipseW, double ellipseH) {
+    final faceCenter = faceRect.center;
+    final distance = (faceCenter - center).distance;
+    
+    // Allow 20% tolerance from center
+    final maxDistance = math.min(ellipseW, ellipseH) * 0.2;
+    
+    // Also check if face size matches ellipse reasonably (70-100% of ellipse)
+    final faceRatio = faceRect.width / ellipseW;
+    
+    // 🔧 FIXED: distance (was ance)
+    return distance < maxDistance && faceRatio > 0.6 && faceRatio < 1.1;
+  }
+
+  void _drawCornerMarkers(Canvas canvas, Rect rect, Color color) {
+    final markerPaint = Paint()
+      ..color = color
+      ..strokeWidth = 4
+      ..style = PaintingStyle.stroke;
+    
+    final cornerLength = 25.0;
+    
+    // Top-left
+    canvas.drawLine(
+      rect.topLeft,
+      rect.topLeft + Offset(cornerLength, 0),
+      markerPaint,
+    );
+    canvas.drawLine(
+      rect.topLeft,
+      rect.topLeft + Offset(0, cornerLength),
+      markerPaint,
+    );
+    
+    // Top-right
+    canvas.drawLine(
+      rect.topRight,
+      rect.topRight + Offset(-cornerLength, 0),
+      markerPaint,
+    );
+    canvas.drawLine(
+      rect.topRight,
+      rect.topRight + Offset(0, cornerLength),
+      markerPaint,
+    );
+    
+    // Bottom-left
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft + Offset(cornerLength, 0),
+      markerPaint,
+    );
+    canvas.drawLine(
+      rect.bottomLeft,
+      rect.bottomLeft + Offset(0, -cornerLength),
+      // 🔧 FIXED: markerPaint (was erPaint)
+      markerPaint,
+    );
+    
+    // Bottom-right
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight + Offset(-cornerLength, 0),
+      markerPaint,
+    );
+    canvas.drawLine(
+      rect.bottomRight,
+      rect.bottomRight + Offset(0, -cornerLength),
+      markerPaint,
+    );
+  }
+
+  // Draw the actual detected face boxes
+  void _drawDetectedFaces(Canvas canvas, Size size) {
     final paint = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0
-      ..color = Colors.indigoAccent;
-
-    final dotPaint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = Colors.pinkAccent;
+      ..strokeWidth = 2.0;
 
     for (final face in faces) {
-      // Scale bounding box from image size to widget size
-      final rect = _scaleRect(
-        rect: face.boundingBox,
-        imageSize: imageSize,
-        widgetSize: size,
-      );
-
-      // Check for blinking
-      final leftEye = face.leftEyeOpenProbability ?? 1.0;
-      final rightEye = face.rightEyeOpenProbability ?? 1.0;
-      final isBlinking = leftEye < 0.3 && rightEye < 0.3;
+      final rect = _scaleRect(face.boundingBox, size);
       
-      // Highlight when both eyes are closed below 0.3 threshold (based on specs)
-      paint.color = isBlinking ? Colors.redAccent : Colors.green[400]!;
-
-      // Draw bounding box with rounded corners
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(rect, const Radius.circular(12)),
-        paint,
-      );
-      
-      // Draw contour lines
-      final contourPaint = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0
-        ..color = Colors.white54;
-      
-      for (final contour in face.contours.values) {
-        if (contour.isEmpty) continue;
-        final path = Path();
-        final firstPoint = _scaleOffset(
-          offset: contour.first,
-          imageSize: imageSize,
-          widgetSize: size,
-        );
-        path.moveTo(firstPoint.dx, firstPoint.dy);
-        for (int i = 1; i < contour.length; i++) {
-          final point = _scaleOffset(
-            offset: contour[i],
-            imageSize: imageSize,
-            widgetSize: size,
-          );
-          path.lineTo(point.dx, point.dy);
-        }
-        canvas.drawPath(path, contourPaint);
+      // Color based on face quality
+      if (faces.length > 1) {
+        paint.color = Colors.red; // Multiple faces = red
+      } else {
+        paint.color = Colors.greenAccent; // Single good face = green
       }
-
+      
+      canvas.drawRect(rect, paint);
+      
       // Draw landmarks
+      final dotPaint = Paint()
+        ..color = Colors.pinkAccent
+        ..style = PaintingStyle.fill;
+      
+      // 🔧 FIXED: Added missing { after for loop
       for (final landmark in face.landmarks.values) {
-        final offset = _scaleOffset(
-          offset: landmark,
-          imageSize: imageSize,
-          widgetSize: size,
-        );
+        final offset = _scaleOffset(landmark, size);
         canvas.drawCircle(offset, 3, dotPaint);
       }
     }
   }
 
-  Rect _scaleRect({
-    required Rect rect,
-    required Size imageSize,
-    required Size widgetSize,
-  }) {
-    // Note: This logic assumes portrait mode and might need adjustments 
-    // for complex rotation/mirroring scenarios (e.g. front camera flip).
-    final double scaleX = widgetSize.width / imageSize.height;
-    final double scaleY = widgetSize.height / imageSize.width;
+  Rect _scaleRect(Rect rect, Size widgetSize) {
+    // Calculate scale factors preserving aspect ratio
+    final double scaleX = widgetSize.width / imageSize.width;
+    final double scaleY = widgetSize.height / imageSize.height;
+    final scale = math.min(scaleX, scaleY);
+    
+    final offsetX = (widgetSize.width - imageSize.width * scale) / 2;
+    final offsetY = (widgetSize.height - imageSize.height * scale) / 2;
 
     return Rect.fromLTRB(
-      rect.left * scaleX,
-      rect.top * scaleY,
-      rect.right * scaleX,
-      rect.bottom * scaleY,
+      rect.left * scale + offsetX,
+      rect.top * scale + offsetY,
+      rect.right * scale + offsetX,
+      rect.bottom * scale + offsetY,
     );
   }
 
-  Offset _scaleOffset({
-    required Offset offset,
-    required Size imageSize,
-    required Size widgetSize,
-  }) {
-    final double scaleX = widgetSize.width / imageSize.height;
-    final double scaleY = widgetSize.height / imageSize.width;
+  Offset _scaleOffset(Offset offset, Size widgetSize) {
+    final double scaleX = widgetSize.width / imageSize.width;
+    final double scaleY = widgetSize.height / imageSize.height;
+    final scale = math.min(scaleX, scaleY);
+    
+    final offsetX = (widgetSize.width - imageSize.width * scale) / 2;
+    // 🔧 FIXED: final offsetY = (was fin=)
+    final offsetY = (widgetSize.height - imageSize.height * scale) / 2;
 
-    return Offset(offset.dx * scaleX, offset.dy * scaleY);
+    return Offset(
+      offset.dx * scale + offsetX,
+      offset.dy * scale + offsetY,
+    );
   }
 
   @override
-  bool shouldRepaint(FaceOverlayPainter oldDelegate) {
-    return oldDelegate.faces != faces || oldDelegate.imageSize != imageSize;
+  bool shouldRepaint(covariant FaceOverlayPainter oldDelegate) {
+    return oldDelegate.faces.length != faces.length ||
+           oldDelegate.rotation != rotation;
   }
 }

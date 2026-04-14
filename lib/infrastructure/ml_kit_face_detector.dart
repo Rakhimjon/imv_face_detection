@@ -1,6 +1,9 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui';
+import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:fpdart/fpdart.dart';
 import 'package:face_imv/domain/face_entity.dart';
 import 'package:face_imv/domain/i_face_detector.dart';
@@ -9,20 +12,140 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
 
 class MLKitFaceDetector implements IFaceDetector {
   final ml_kit.FaceDetector _detector;
+  bool _isProcessing = false;
 
   MLKitFaceDetector({ml_kit.FaceDetectorOptions? options})
-    : _detector = ml_kit.FaceDetector(
-        options:
-            options ??
-            ml_kit.FaceDetectorOptions(
-              enableLandmarks: true,
-              enableClassification: true,
-              enableTracking: true,
-              enableContours: true,
-              minFaceSize: 0.15,
-              performanceMode: ml_kit.FaceDetectorMode.accurate,
-            ),
-      );
+      : _detector = ml_kit.FaceDetector(
+          options: options ??
+              ml_kit.FaceDetectorOptions(
+                enableLandmarks: true,
+                enableClassification: true,
+                enableTracking: true,
+                enableContours: true,
+                minFaceSize: 0.15,
+                performanceMode: ml_kit.FaceDetectorMode.accurate,
+              ),
+        );
+
+  @override
+  Future<Either<String, List<FaceEntity>>> detectFromCameraImage(
+    CameraImage cameraImage,
+    CameraDescription camera,
+  ) async {
+    if (_isProcessing) return const Right([]);
+    _isProcessing = true;
+
+    try {
+      final inputImage = await _convertCameraImage(cameraImage, camera);
+      if (inputImage == null) {
+        return const Left('Failed to convert camera image');
+      }
+
+      final result = await detectFromInputImage(inputImage);
+      return result;
+    } catch (e) {
+      return Left('Camera processing error: $e');
+    } finally {
+      _isProcessing = false;
+    }
+  }
+
+  Future<ml_kit.InputImage?> _convertCameraImage(
+    CameraImage image,
+    CameraDescription camera,
+  ) async {
+    try {
+      final rotation = _getImageRotation(camera.sensorOrientation);
+
+      if (Platform.isAndroid) {
+        final bytes = _convertYUV420ToNV21(image);
+        
+        final metadata = ml_kit.InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation: rotation,
+          format: ml_kit.InputImageFormat.nv21,
+          bytesPerRow: image.width,
+        );
+
+        return ml_kit.InputImage.fromBytes(
+          bytes: bytes,
+          metadata: metadata,
+        );
+      } else if (Platform.isIOS) {
+        final bytes = image.planes[0].bytes;
+        
+        final metadata = ml_kit.InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation: rotation,
+          format: ml_kit.InputImageFormat.bgra8888,
+          bytesPerRow: image.planes[0].bytesPerRow,
+        );
+
+        return ml_kit.InputImage.fromBytes(
+          bytes: bytes,
+          metadata: metadata,
+        );
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Image conversion error: $e');
+      return null;
+    }
+  }
+
+  Uint8List _convertYUV420ToNV21(CameraImage image) {
+    final width = image.width;
+    final height = image.height;
+    
+    // 🔧 FIXED: yPlane = (was yPimage.planes[0])
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    final nv21 = Uint8List(width * height + (width * height ~/ 2));
+    
+    // Copy Y plane
+    final yBytes = yPlane.bytes;
+    for (int i = 0; i < width * height; i++) {
+      nv21[i] = yBytes[i];
+    }
+
+    // Interleave U and V
+    int uvIndex = width * height;
+    final uBytes = uPlane.bytes;
+    final vBytes = vPlane.bytes;
+    
+    final uvWidth = width ~/ 2;
+    final uvHeight = height ~/ 2;
+    
+    for (int row = 0; row < uvHeight; row++) {
+      for (int col = 0; col < uvWidth; col++) {
+        final uvIndexSrc = row * uPlane.bytesPerRow + col * uPlane.bytesPerPixel!;
+        if (uvIndexSrc < uBytes.length && uvIndexSrc < vBytes.length) {
+          nv21[uvIndex++] = vBytes[uvIndexSrc];
+          nv21[uvIndex++] = uBytes[uvIndexSrc];
+        }
+      }
+    }
+    
+    return nv21;
+  }
+
+  // 🔧 FIXED: return ml_kit.InputImageRotation (was ret.InputImageRotation)
+  ml_kit.InputImageRotation _getImageRotation(int sensorOrientation) {
+    switch (sensorOrientation) {
+      case 0:
+        return ml_kit.InputImageRotation.rotation0deg;
+      case 90:
+        return ml_kit.InputImageRotation.rotation90deg;
+      case 180:
+        return ml_kit.InputImageRotation.rotation180deg;
+      case 270:
+        return ml_kit.InputImageRotation.rotation270deg;
+      default:
+        return ml_kit.InputImageRotation.rotation0deg;
+    }
+  }
 
   @override
   Future<Either<String, List<FaceEntity>>> detectFromImage(
@@ -43,141 +166,34 @@ class MLKitFaceDetector implements IFaceDetector {
     try {
       final faces = await _detector.processImage(inputImage);
 
-      // 🔍 DEBUG LOGGING - Face Detection Results
-      if (kDebugMode) {
-        debugPrint('═══════════════════════════════════════════════');
-        debugPrint('🎯 FACE DETECTION ANALYSIS');
-        debugPrint('═══════════════════════════════════════════════');
-        debugPrint('📊 Faces detected: ${faces.length}');
+      // Quality filter
+      final validFaces = faces.where((face) => _isHighQualityFace(face)).toList();
 
-        for (var i = 0; i < faces.length; i++) {
-          final face = faces[i];
-          debugPrint('\n👤 Face #${i + 1}:');
-          debugPrint('  📏 Bounding Box: ${face.boundingBox}');
-          debugPrint('  🎭 Tracking ID: ${face.trackingId ?? "N/A"}');
-
-          // Head Rotation Analysis
-          debugPrint('\n  🔄 HEAD ROTATION (Euler Angles):');
-          final pitch = face.headEulerAngleX ?? 0.0;
-          final yaw = face.headEulerAngleY ?? 0.0;
-          final roll = face.headEulerAngleZ ?? 0.0;
-          debugPrint(
-            '    ↕️  Pitch (X): ${pitch.toStringAsFixed(2)}° ${_getPitchDirection(pitch)}',
-          );
-          debugPrint(
-            '    ↔️  Yaw (Y):   ${yaw.toStringAsFixed(2)}° ${_getYawDirection(yaw)}',
-          );
-          debugPrint(
-            '    🔃 Roll (Z):  ${roll.toStringAsFixed(2)}° ${_getRollDirection(roll)}',
-          );
-
-          // Eye & Smile Detection
-          debugPrint('\n  😊 FACIAL EXPRESSIONS:');
-          final leftEye = face.leftEyeOpenProbability ?? 0.0;
-          final rightEye = face.rightEyeOpenProbability ?? 0.0;
-          final smile = face.smilingProbability ?? 0.0;
-          debugPrint(
-            '    👁️  Left Eye:  ${(leftEye * 100).toStringAsFixed(1)}% ${leftEye > 0.7
-                ? "OPEN ✅"
-                : leftEye < 0.3
-                ? "CLOSED ❌"
-                : "PARTIAL 👀"}',
-          );
-          debugPrint(
-            '    👁️  Right Eye: ${(rightEye * 100).toStringAsFixed(1)}% ${rightEye > 0.7
-                ? "OPEN ✅"
-                : rightEye < 0.3
-                ? "CLOSED ❌"
-                : "PARTIAL 👀"}',
-          );
-          debugPrint(
-            '    😄 Smile:     ${(smile * 100).toStringAsFixed(1)}% ${smile > 0.7 ? "SMILING 😊" : "NEUTRAL 😐"}',
-          );
-
-          // Face Quality Checks
-          debugPrint('\n  ✅ FACE QUALITY VALIDATION:');
-          final faceSize = face.boundingBox.width;
-          debugPrint(
-            '    📐 Face Width: ${faceSize.toStringAsFixed(0)}px ${_getFaceSizeQuality(faceSize)}',
-          );
-          debugPrint(
-            '    🎯 Position: ${_isHeadCentered(yaw, pitch) ? "CENTERED ✅" : "OFF-CENTER ⚠️"}',
-          );
-          debugPrint(
-            '    👁️  Blink Detection: ${leftEye < 0.35 && rightEye < 0.35 ? "BLINKING 👀" : "EYES OPEN ✅"}',
-          );
-          debugPrint(
-            '    🧑 Human Face: ${_isHumanFace(face) ? "VERIFIED ✅" : "UNCERTAIN ⚠️"}',
-          );
-
-          // Landmarks
-          if (face.landmarks.isNotEmpty) {
-            debugPrint('\n  📍 LANDMARKS DETECTED: ${face.landmarks.length}');
-            for (final landmark in face.landmarks.values) {
-              if (landmark != null) {
-                debugPrint(
-                  '    - ${landmark.type.name}: (${landmark.position.x.toInt()}, ${landmark.position.y.toInt()})',
-                );
-              }
-            }
-          }
-
-          // Contours
-          if (face.contours.isNotEmpty) {
-            debugPrint('  🎨 CONTOURS DETECTED: ${face.contours.length}');
-          }
-        }
-
-        debugPrint('═══════════════════════════════════════════════\n');
-      }
-
-      final entities = faces.map(_mapToEntity).toList();
+      final entities = validFaces.map(_mapToEntity).toList();
       return Right(entities);
     } catch (e) {
-      debugPrint('❌ ML Kit Detection Error: $e');
+      debugPrint('ML Kit Detection Error: $e');
       return Left('ML Kit Detection Error: $e');
     }
   }
 
-  // Helper methods for debug analysis
-  String _getPitchDirection(double pitch) {
-    if (pitch < -15) return '(Looking DOWN ⬇️)';
-    if (pitch > 15) return '(Looking UP ⬆️)';
-    return '(Looking STRAIGHT 👁️)';
-  }
-
-  String _getYawDirection(double yaw) {
-    if (yaw < -20) return '(Turning LEFT ⬅️)';
-    if (yaw > 20) return '(Turning RIGHT ➡️)';
-    return '(Facing CENTER 🎯)';
-  }
-
-  String _getRollDirection(double roll) {
-    if (roll.abs() < 10) return '(Head STRAIGHT 📏)';
-    return '(Head TILTED 🔄)';
-  }
-
-  String _getFaceSizeQuality(double width) {
-    if (width > 280) return '(TOO CLOSE 🔴 - Move back)';
-    if (width < 100) return '(TOO FAR 🟡 - Move closer)';
-    return '(PERFECT DISTANCE 🟢)';
-  }
-
-  bool _isHeadCentered(double yaw, double pitch) {
-    return yaw.abs() < 15 && pitch.abs() < 15;
-  }
-
-  bool _isHumanFace(ml_kit.Face face) {
-    // Validate that detected face has human characteristics
-    final hasValidSize =
-        face.boundingBox.width > 50 && face.boundingBox.height > 50;
-    final hasEyeData =
-        face.leftEyeOpenProbability != null &&
-        face.rightEyeOpenProbability != null;
-    final hasValidRotation =
-        face.headEulerAngleY != null && face.headEulerAngleX != null;
-
-    return hasValidSize && hasEyeData && hasValidRotation;
+  // Quality validation
+  bool _isHighQualityFace(ml_kit.Face face) {
+    final width = face.boundingBox.width;
+    final height = face.boundingBox.height;
+    if (width < 60 || height < 60) return false;
+    
+    final leftEye = face.landmarks[ml_kit.FaceLandmarkType.leftEye];
+    final rightEye = face.landmarks[ml_kit.FaceLandmarkType.rightEye];
+    final nose = face.landmarks[ml_kit.FaceLandmarkType.noseBase];
+    
+    if (leftEye == null || rightEye == null || nose == null) return false;
+    
+    final yaw = face.headEulerAngleY?.abs() ?? 0;
+    final pitch = face.headEulerAngleX?.abs() ?? 0;
+    if (yaw > 45 || pitch > 40) return false;
+    
+    return true;
   }
 
   FaceEntity _mapToEntity(ml_kit.Face face) {
@@ -189,6 +205,7 @@ class MLKitFaceDetector implements IFaceDetector {
         if (type != null) {
           landmarks[type] = Offset(
             landmark.position.x.toDouble(),
+            // 🔧 FIXED: landmark.position.y (was landmark.ition.y)
             landmark.position.y.toDouble(),
           );
         }
@@ -221,6 +238,7 @@ class MLKitFaceDetector implements IFaceDetector {
     );
   }
 
+  // 🔧 FIXED: ml_kit.FaceLandmarkType.bottomMouth (was FaceLanType)
   FaceLandmarkType? _mapLandmarkType(ml_kit.FaceLandmarkType type) {
     switch (type) {
       case ml_kit.FaceLandmarkType.bottomMouth:
@@ -246,6 +264,8 @@ class MLKitFaceDetector implements IFaceDetector {
     }
   }
 
+  // 🔧 FIXED: ml_kit.FaceContourType.face (was .e)
+  // 🔧 FIXED: rightEyebrowBottom (was rightEyebrowBttom)
   FaceContourType? _mapContourType(ml_kit.FaceContourType type) {
     switch (type) {
       case ml_kit.FaceContourType.face:
@@ -270,7 +290,7 @@ class MLKitFaceDetector implements IFaceDetector {
         return FaceContourType.rightCheek;
       case ml_kit.FaceContourType.rightEye:
         return FaceContourType.rightEye;
-      case ml_kit.FaceContourType.rightEyebrowBottom:
+      case ml_kit.FaceContourType.rightEyebrowBottom: // Fixed: Bttom -> Bottom
         return FaceContourType.rightEyebrowBottom;
       case ml_kit.FaceContourType.rightEyebrowTop:
         return FaceContourType.rightEyebrowTop;

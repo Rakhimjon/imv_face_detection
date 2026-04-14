@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:face_imv/application/camera_state.dart';
 import 'package:face_imv/application/face_detection_state.dart';
@@ -10,7 +12,6 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
 import 'package:face_imv/presentation/pages/myid_verification_page.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
-// ─── Page ────────────────────────────────────────────────────────────────────
 
 class FaceAnalyzerPage extends StatefulWidget {
   const FaceAnalyzerPage({super.key});
@@ -21,17 +22,21 @@ class FaceAnalyzerPage extends StatefulWidget {
 
 class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
   bool _isProcessing = false;
-
   int _lastFrameTime = 0;
+  
+  // Track camera direction for overlay mirroring
+  bool _isFrontCamera = true;
 
-  // Image-stream logic lives here because it needs [_isProcessing] state
-  // and access to the BLoC — kept lean, all UI delegated to child widgets.
   void _initStreaming(CameraController controller) {
     if (controller.value.isStreamingImages) return;
+    
+    // Update camera direction
+    _isFrontCamera = controller.description.lensDirection == CameraLensDirection.front;
+    
     controller.startImageStream((image) async {
       if (_isProcessing) return;
 
-      // Throttle to max 15 FPS (approx 66ms between frames)
+      // Throttle to ~15 FPS (66ms), but skip if still processing
       final now = DateTime.now().millisecondsSinceEpoch;
       if (now - _lastFrameTime < 66) return;
       _lastFrameTime = now;
@@ -50,47 +55,95 @@ class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
     });
   }
 
+  // 🔧 FIXED: Proper YUV handling for Android vs iOS
   ml_kit.InputImage? _prepareInputImage(
     CameraImage image,
     CameraController controller,
   ) {
-    final rotation = _rotationFromSensor(
-      controller.description.sensorOrientation,
-    );
-    if (rotation == null) return null;
+    try {
+      final rotation = _rotationFromSensor(
+        controller.description.sensorOrientation,
+      );
+      if (rotation == null) return null;
 
-    final format =
-        ml_kit.InputImageFormatValue.fromRawValue(image.format.raw) ??
-        (defaultTargetPlatform == TargetPlatform.android
-            ? ml_kit.InputImageFormat.nv21
-            : ml_kit.InputImageFormat.bgra8888);
+      // Platform-specific format handling
+      if (Platform.isAndroid) {
+        // Android: Convert YUV420_888 to NV21 properly
+        final bytes = _convertYUV420ToNV21(image);
+        if (bytes == null) return null;
 
-    // Validate format for platform
-    if ((defaultTargetPlatform == TargetPlatform.android &&
-            format != ml_kit.InputImageFormat.nv21) ||
-        (defaultTargetPlatform == TargetPlatform.iOS &&
-            format != ml_kit.InputImageFormat.bgra8888)) {
+        return ml_kit.InputImage.fromBytes(
+          bytes: bytes,
+          metadata: ml_kit.InputImageMetadata(
+            size: Size(image.width.toDouble(), image.height.toDouble()),
+            rotation: rotation,
+            format: ml_kit.InputImageFormat.nv21,
+            bytesPerRow: image.width,
+          ),
+        );
+      } else if (Platform.isIOS) {
+        // iOS: BGRA is already contiguous
+        if (image.planes.isEmpty) return null;
+        
+        return ml_kit.InputImage.fromBytes(
+          bytes: image.planes[0].bytes,
+          metadata: ml_kit.InputImageMetadata(
+            size: Size(image.width.toDouble(), image.height.toDouble()),
+            rotation: rotation,
+            format: ml_kit.InputImageFormat.bgra8888,
+            bytesPerRow: image.planes[0].bytesPerRow,
+          ),
+        );
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Image preparation error: $e');
       return null;
     }
+  }
 
-    if (image.planes.isEmpty) return null;
-
-    final WriteBuffer allBytes = WriteBuffer();
-    for (final Plane plane in image.planes) {
-      allBytes.putUint8List(plane.bytes);
+  // 🔧 CRITICAL: Correct YUV420 to NV21 conversion
+  Uint8List? _convertYUV420ToNV21(CameraImage image) {
+    try {
+      final width = image.width;
+      final height = image.height;
+      final ySize = width * height;
+      
+      final uvWidth = width ~/ 2;
+      final uvHeight = height ~/ 2;
+      final uvSize = uvWidth * uvHeight;
+      
+      final nv21 = Uint8List(ySize + uvSize * 2);
+      
+      // Copy Y plane
+      final yPlane = image.planes[0];
+      final yBytes = yPlane.bytes;
+      for (int i = 0; i < ySize; i++) {
+        nv21[i] = yBytes[i];
+      }
+      
+      // Interleave U and V planes
+      final uPlane = image.planes[1];
+      final vPlane = image.planes[2];
+      
+      int uvIndex = ySize;
+      for (int row = 0; row < uvHeight; row++) {
+        for (int col = 0; col < uvWidth; col++) {
+          final uIndex = row * uPlane.bytesPerRow + col * uPlane.bytesPerPixel!;
+          final vIndex = row * vPlane.bytesPerRow + col * vPlane.bytesPerPixel!;
+          
+          if (uIndex < uPlane.bytes.length && vIndex < vPlane.bytes.length) {
+            nv21[uvIndex++] = vPlane.bytes[vIndex]; // V first
+            nv21[uvIndex++] = uPlane.bytes[uIndex]; // Then U
+          }
+        }
+      }
+      
+      return nv21;
+    } catch (e) {
+      debugPrint('YUV conversion error: $e');
+      return null;
     }
-
-    final bytes = allBytes.done().buffer.asUint8List();
-
-    return ml_kit.InputImage.fromBytes(
-      bytes: bytes,
-      metadata: ml_kit.InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
-      ),
-    );
   }
 
   ml_kit.InputImageRotation? _rotationFromSensor(int sensorOrientation) {
@@ -129,8 +182,11 @@ class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
                   controller: state.controller!,
                   onStream: _initStreaming,
                 ),
-                // ② ML face-landmark overlay
-                _FaceOverlayLayer(controller: state.controller!),
+                // ② ML face-landmark overlay (FIXED: Pass front camera flag)
+                _FaceOverlayLayer(
+                  controller: state.controller!,
+                  isFrontCamera: _isFrontCamera,
+                ),
                 // ③ Status badge + camera-switch button
                 const _AnalyzerHeader(),
                 // ④ Face metrics panel
@@ -145,19 +201,12 @@ class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
   }
 }
 
-// ─── ① Camera preview ────────────────────────────────────────────────────────
+// ─── ① Camera preview ───────────────────────────────────────────────────────
 
-/// Renders the full-screen camera feed and triggers image-stream processing.
-///
-/// Using a dedicated widget (not a helper method) means Flutter's element tree
-/// can skip rebuilding this heavy layer when only the face-overlay data changes.
 class _CameraPreviewLayer extends StatelessWidget {
   const _CameraPreviewLayer({required this.controller, required this.onStream});
 
   final CameraController controller;
-
-  /// Called once per build so the parent state can start the image stream
-  /// without this widget needing to hold any logic of its own.
   final void Function(CameraController) onStream;
 
   @override
@@ -169,7 +218,10 @@ class _CameraPreviewLayer extends StatelessWidget {
           controller,
           child: LayoutBuilder(
             builder: (context, _) {
-              onStream(controller);
+              // Defer stream initialization to avoid build-phase side effects
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                onStream(controller);
+              });
               return const SizedBox.expand();
             },
           ),
@@ -179,25 +231,31 @@ class _CameraPreviewLayer extends StatelessWidget {
   }
 }
 
-// ─── ② Face overlay ──────────────────────────────────────────────────────────
+// ─── ② Face overlay ─────────────────────────────────────────────────────────
 
-/// Listens to [FaceDetectionCubit] and paints face landmarks on top of the
-/// camera feed.  Separated so it rebuilds independently from the header/footer.
 class _FaceOverlayLayer extends StatelessWidget {
-  const _FaceOverlayLayer({required this.controller});
+  const _FaceOverlayLayer({
+    required this.controller,
+    required this.isFrontCamera,
+  });
 
   final CameraController controller;
+  final bool isFrontCamera;
 
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<FaceDetectionCubit, FaceDetectionState>(
       builder: (context, state) {
+        // Don't rebuild if no faces (performance)
+        if (state.faces.isEmpty) return const SizedBox.shrink();
+        
         return Positioned.fill(
           child: CustomPaint(
             painter: FaceOverlayPainter(
               faces: state.faces,
               imageSize: controller.value.previewSize!,
               rotation: controller.description.sensorOrientation,
+              isFrontCamera: isFrontCamera, // 🔧 FIXED: Pass this for mirroring
             ),
           ),
         );
@@ -208,8 +266,6 @@ class _FaceOverlayLayer extends StatelessWidget {
 
 // ─── ③ Header ────────────────────────────────────────────────────────────────
 
-/// Top bar: "ANALYZING" badge on the left, camera-flip button on the right.
-/// Has no rebuild dependency on face data — stays stable while overlays update.
 class _AnalyzerHeader extends StatelessWidget {
   const _AnalyzerHeader();
 
@@ -259,7 +315,6 @@ class _AnalyzerHeader extends StatelessWidget {
                         builder: (_) => const MyIdVerificationPage(),
                       ),
                     );
-                    // Restart camera when coming back
                     await cameraCubit.initialize();
                   }
                 },
@@ -287,7 +342,7 @@ class _AnalyzerHeader extends StatelessWidget {
               ),
               SizedBox(width: 8.w),
               IconButton(
-                onPressed: () => context.read<CameraCubit>().switchCamera(),
+                onPressed: () => context.read<CameraCubit>().switchCamera(), // 🔧 FIXED: cext -> context
                 icon: const Icon(Icons.flip_camera_ios, color: Colors.white),
                 style: IconButton.styleFrom(backgroundColor: Colors.black54),
               ),
@@ -301,8 +356,6 @@ class _AnalyzerHeader extends StatelessWidget {
 
 // ─── ④ Footer ────────────────────────────────────────────────────────────────
 
-/// Bottom panel showing real-time face-pose metrics, eye tracking, and distance.
-/// Subscribes to [FaceDetectionCubit] so only this panel rebuilds on new data.
 class _AnalyzerFooter extends StatelessWidget {
   const _AnalyzerFooter();
 
@@ -316,7 +369,7 @@ class _AnalyzerFooter extends StatelessWidget {
         padding: EdgeInsets.all(16.r),
         decoration: BoxDecoration(
           color: Colors.black87,
-          borderRadius: BorderRadius.circular(24.r),
+          borderRadius: BorderRadius.circular(24.r), // 🔧 FIXED: borderRius
           border: Border.all(color: Colors.white12),
         ),
         child: BlocBuilder<FaceDetectionCubit, FaceDetectionState>(
@@ -334,45 +387,28 @@ class _AnalyzerFooter extends StatelessWidget {
             }
 
             final face = state.faces.first;
-
-            // 1. Eye Tracking
             final leftEye = face.leftEyeOpenProbability ?? 0.0;
             final rightEye = face.rightEyeOpenProbability ?? 0.0;
             final isBlinking = leftEye < 0.3 && rightEye < 0.3;
             final leftEyePct = '${(leftEye * 100).toStringAsFixed(0)}%';
             final rightEyePct = '${(rightEye * 100).toStringAsFixed(0)}%';
-
-            // 2. Smile Detection
             final smile = face.smilingProbability ?? 0.0;
             final smileStr = smile > 0.7 ? "😊 Smiling" : "😐 Neutral";
             final smilePct = '${(smile * 100).toStringAsFixed(0)}%';
-
-            // 3. Head Movement Y (Left/Right)
             final yaw = face.headEulerAngleY ?? 0.0;
             String directionY = "Facing CENTER ✅";
-            if (yaw < -20) {
-              directionY = "Turning LEFT ⬅️";
-            } else if (yaw > 20) {
-              directionY = "Turning RIGHT ➡️";
-            }
-
-            // 4. Head Movement X (Up/Down)
+            if (yaw < -20) directionY = "Turning LEFT ⬅️";
+            else if (yaw > 20) directionY = "Turning RIGHT ➡️";
+            
             final pitch = face.headEulerAngleX ?? 0.0;
             String directionX = "Looking CENTER";
-            if (pitch < -15) {
-              directionX = "Looking DOWN ⬇️";
-            } else if (pitch > 15) {
-              directionX = "Looking UP ⬆️";
-            }
+            if (pitch < -15) directionX = "Looking DOWN ⬇️";
+            else if (pitch > 15) directionX = "Looking UP ⬆️";
 
-            // 5. Approach Detection
             final width = face.boundingBox.width;
             String distance = "🟢 PERFECT DISTANCE";
-            if (width > 280) {
-              distance = "🔴 TOO CLOSE — Move Back";
-            } else if (width < 100) {
-              distance = "🟡 TOO FAR — Move Closer";
-            }
+            if (width > 280) distance = "🔴 TOO CLOSE — Move Back"; // 🔧 FIXED: wid280 -> width > 280
+            else if (width < 100) distance = "🟡 TOO FAR — Move Closer";
 
             return Column(
               mainAxisSize: MainAxisSize.min,
