@@ -7,19 +7,23 @@ class FaceOverlayPainter extends CustomPainter {
   final Size imageSize;
   final int rotation;
   final bool isFrontCamera;
+  final double ellipseWidthFactor;
+  final double? ellipseHeightFactor;
 
   FaceOverlayPainter({
     required this.faces,
     required this.imageSize,
     required this.rotation,
     this.isFrontCamera = true,
+    this.ellipseWidthFactor = 0.75,
+    this.ellipseHeightFactor,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     // 1. Draw the reference ellipse (face guide) first (background layer)
     _drawFaceGuideEllipse(canvas, size);
-    
+
     // 2. Draw detected faces overlay
     if (faces.isNotEmpty) {
       _drawDetectedFaces(canvas, size);
@@ -29,11 +33,13 @@ class FaceOverlayPainter extends CustomPainter {
   // 🎯 FACE GUIDE ELLIPSE (The oval where user should put their face)
   void _drawFaceGuideEllipse(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    
+
     // Calculate ellipse size (typically 70-80% of screen width, aspect ratio 3:4 for face)
-    final ellipseWidth = size.width * 0.75;
-    final ellipseHeight = ellipseWidth * 1.25; // Taller than wide (face shape)
-    
+    final ellipseWidth = size.width * ellipseWidthFactor;
+    final ellipseHeight = ellipseHeightFactor == null
+        ? ellipseWidth * 1.25
+        : size.height * ellipseHeightFactor!;
+
     final rect = Rect.fromCenter(
       center: center,
       width: ellipseWidth,
@@ -52,13 +58,12 @@ class FaceOverlayPainter extends CustomPainter {
 
     // Check conditions
     if (faces.length > 1) {
-      // 🔴 MULTIPLE FACES ERROR
       guidePaint.color = Colors.redAccent;
       guidePaint.strokeWidth = 4.0;
-      
+
       // Draw red ellipse
       canvas.drawOval(rect, guidePaint);
-      
+
       // Error text: "Faqat bitta yuzni ko'rsating" (Show only one face)
       textPainter.text = TextSpan(
         text: "❌ Faqat bitta yuzni ko'rsating",
@@ -70,16 +75,15 @@ class FaceOverlayPainter extends CustomPainter {
           backgroundColor: Colors.black54,
         ),
       );
-      
     } else if (faces.isEmpty) {
       // ⚪ WAITING STATE (Gray dotted line)
       guidePaint.color = Colors.white54;
       guidePaint.strokeWidth = 2.0;
       // Draw dotted effect
       guidePaint.style = PaintingStyle.stroke;
-      
+
       canvas.drawOval(rect, guidePaint);
-      
+
       // Instruction text
       textPainter.text = TextSpan(
         text: "Yuzingizni oval ichiga joylashtiring",
@@ -89,30 +93,36 @@ class FaceOverlayPainter extends CustomPainter {
           backgroundColor: Colors.black45,
         ),
       );
-      
     } else {
       // One face detected - check positioning
       final face = faces.first;
       final faceRect = _scaleRect(face.boundingBox, size);
-      
+
       // Check if face is inside the ellipse guide
-      final isCentered = _isFaceCenteredInEllipse(faceRect, center, ellipseWidth, ellipseHeight);
+      final isCentered = _isFaceCenteredInEllipse(
+        faceRect,
+        center,
+        ellipseWidth,
+        ellipseHeight,
+      );
       // 🔧 FIXED: face.boundingBox (was face.bougBox)
-      final isTooSmall = face.boundingBox.width < imageSize.width * 0.15; // Too far
-      final isTooBig = face.boundingBox.width > imageSize.width * 0.85; // Too close
-      
+      final isTooSmall =
+          face.boundingBox.width < imageSize.width * 0.15; // Too far
+      final isTooBig =
+          face.boundingBox.width > imageSize.width * 0.85; // Too close
+
       if (isTooSmall) {
         // 🟡 TOO FAR - "Come closer"
         guidePaint.color = Colors.amber;
         guidePaint.strokeWidth = 3.0;
         canvas.drawOval(rect, guidePaint);
-        
+
         // Animated-like effect (pulsing suggestion)
         final pulsePaint = Paint()
           ..color = Colors.amber.withOpacity(0.3)
           ..style = PaintingStyle.fill;
         canvas.drawOval(rect, pulsePaint);
-        
+
         textPainter.text = TextSpan(
           text: "📱 Yuzingizni yaqinroq qiling",
           style: TextStyle(
@@ -122,13 +132,12 @@ class FaceOverlayPainter extends CustomPainter {
             backgroundColor: Colors.black54,
           ),
         );
-        
       } else if (isTooBig) {
         // 🟠 TOO CLOSE - "Move back"
         guidePaint.color = Colors.orange;
         guidePaint.strokeWidth = 3.0;
         canvas.drawOval(rect, guidePaint);
-        
+
         // 🔧 FIXED: text: (was xt:)
         textPainter.text = TextSpan(
           text: "↩️ Ozroq uzoqroq turing",
@@ -139,13 +148,12 @@ class FaceOverlayPainter extends CustomPainter {
             backgroundColor: Colors.black54,
           ),
         );
-        
       } else if (isCentered) {
         // 🟢 PERFECT POSITION
         guidePaint.color = Colors.greenAccent;
         guidePaint.strokeWidth = 4.0;
         canvas.drawOval(rect, guidePaint);
-        
+
         // Success text
         textPainter.text = TextSpan(
           text: "✅ Ajoyib! Turganingizda qoling",
@@ -156,13 +164,12 @@ class FaceOverlayPainter extends CustomPainter {
             backgroundColor: Colors.black54,
           ),
         );
-        
       } else {
         // 🟡 NOT CENTERED
         guidePaint.color = Colors.yellow;
         guidePaint.strokeWidth = 2.5;
         canvas.drawOval(rect, guidePaint);
-        
+
         // 🔧 FIXED: joylashtiring (was jlashtiring)
         textPainter.text = TextSpan(
           text: "🎯 Yuzingizni markazga joylashtiring",
@@ -177,29 +184,35 @@ class FaceOverlayPainter extends CustomPainter {
 
     // Draw text at bottom of ellipse
     textPainter.layout();
-    textPainter.paint(
-      canvas, 
-      Offset(
-        center.dx - textPainter.width / 2,
-        center.dy + ellipseHeight / 2 + 20,
-      ),
+    final textTop = math.min(
+      center.dy + ellipseHeight / 2 + 20,
+      size.height - textPainter.height - 8,
     );
-    
+    textPainter.paint(
+      canvas,
+      Offset(center.dx - textPainter.width / 2, textTop),
+    );
+
     // Draw corner markers on ellipse (decorative)
     _drawCornerMarkers(canvas, rect, guidePaint.color);
   }
 
   // Check if face bounding box is centered in the ellipse
-  bool _isFaceCenteredInEllipse(Rect faceRect, Offset center, double ellipseW, double ellipseH) {
+  bool _isFaceCenteredInEllipse(
+    Rect faceRect,
+    Offset center,
+    double ellipseW,
+    double ellipseH,
+  ) {
     final faceCenter = faceRect.center;
     final distance = (faceCenter - center).distance;
-    
+
     // Allow 20% tolerance from center
     final maxDistance = math.min(ellipseW, ellipseH) * 0.2;
-    
+
     // Also check if face size matches ellipse reasonably (70-100% of ellipse)
     final faceRatio = faceRect.width / ellipseW;
-    
+
     // 🔧 FIXED: distance (was ance)
     return distance < maxDistance && faceRatio > 0.6 && faceRatio < 1.1;
   }
@@ -209,9 +222,9 @@ class FaceOverlayPainter extends CustomPainter {
       ..color = color
       ..strokeWidth = 4
       ..style = PaintingStyle.stroke;
-    
+
     final cornerLength = 25.0;
-    
+
     // Top-left
     canvas.drawLine(
       rect.topLeft,
@@ -223,7 +236,7 @@ class FaceOverlayPainter extends CustomPainter {
       rect.topLeft + Offset(0, cornerLength),
       markerPaint,
     );
-    
+
     // Top-right
     canvas.drawLine(
       rect.topRight,
@@ -235,7 +248,7 @@ class FaceOverlayPainter extends CustomPainter {
       rect.topRight + Offset(0, cornerLength),
       markerPaint,
     );
-    
+
     // Bottom-left
     canvas.drawLine(
       rect.bottomLeft,
@@ -248,7 +261,7 @@ class FaceOverlayPainter extends CustomPainter {
       // 🔧 FIXED: markerPaint (was erPaint)
       markerPaint,
     );
-    
+
     // Bottom-right
     canvas.drawLine(
       rect.bottomRight,
@@ -270,21 +283,21 @@ class FaceOverlayPainter extends CustomPainter {
 
     for (final face in faces) {
       final rect = _scaleRect(face.boundingBox, size);
-      
+
       // Color based on face quality
       if (faces.length > 1) {
         paint.color = Colors.red; // Multiple faces = red
       } else {
         paint.color = Colors.greenAccent; // Single good face = green
       }
-      
+
       canvas.drawRect(rect, paint);
-      
+
       // Draw landmarks
       final dotPaint = Paint()
         ..color = Colors.pinkAccent
         ..style = PaintingStyle.fill;
-      
+
       // 🔧 FIXED: Added missing { after for loop
       for (final landmark in face.landmarks.values) {
         final offset = _scaleOffset(landmark, size);
@@ -298,7 +311,7 @@ class FaceOverlayPainter extends CustomPainter {
     final double scaleX = widgetSize.width / imageSize.width;
     final double scaleY = widgetSize.height / imageSize.height;
     final scale = math.min(scaleX, scaleY);
-    
+
     final offsetX = (widgetSize.width - imageSize.width * scale) / 2;
     final offsetY = (widgetSize.height - imageSize.height * scale) / 2;
 
@@ -314,20 +327,21 @@ class FaceOverlayPainter extends CustomPainter {
     final double scaleX = widgetSize.width / imageSize.width;
     final double scaleY = widgetSize.height / imageSize.height;
     final scale = math.min(scaleX, scaleY);
-    
+
     final offsetX = (widgetSize.width - imageSize.width * scale) / 2;
     // 🔧 FIXED: final offsetY = (was fin=)
     final offsetY = (widgetSize.height - imageSize.height * scale) / 2;
 
-    return Offset(
-      offset.dx * scale + offsetX,
-      offset.dy * scale + offsetY,
-    );
+    return Offset(offset.dx * scale + offsetX, offset.dy * scale + offsetY);
   }
 
   @override
   bool shouldRepaint(covariant FaceOverlayPainter oldDelegate) {
-    return oldDelegate.faces.length != faces.length ||
-           oldDelegate.rotation != rotation;
+    return oldDelegate.faces != faces ||
+        oldDelegate.imageSize != imageSize ||
+        oldDelegate.rotation != rotation ||
+        oldDelegate.isFrontCamera != isFrontCamera ||
+        oldDelegate.ellipseWidthFactor != ellipseWidthFactor ||
+        oldDelegate.ellipseHeightFactor != ellipseHeightFactor;
   }
 }

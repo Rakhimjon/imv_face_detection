@@ -27,7 +27,8 @@ extension ToastExt on BuildContext {
   void showErrorToast(String message) {
     Fluttertoast.showToast(
       msg: message,
-      toastLength: Toast.LENGTH_LONG,
+      toastLength: Toast.LENGTH_SHORT,
+      timeInSecForIosWeb: 2,
       gravity: ToastGravity.BOTTOM,
       backgroundColor: const Color(0xFFC62828),
       textColor: Colors.white,

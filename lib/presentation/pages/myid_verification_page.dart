@@ -6,6 +6,7 @@ import 'package:face_imv/domain/i_face_detector.dart';
 import 'package:face_imv/domain/face_validator.dart';
 import 'package:face_imv/injection.dart';
 import 'package:face_imv/presentation/core/toast_ext.dart';
+import 'package:face_imv/presentation/widgets/face_overlay_painter.dart';
 import 'package:face_imv/application/camera_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -47,6 +48,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   bool _cameraError = false;
   bool _isProcessing = false;
   bool _faceDetected = false;
+  List<FaceEntity> _detectedFaces = const <FaceEntity>[];
   String? _scanErrorMessage;
   double _scanProgress = 0.0;
   Timer? _analysisTimer;
@@ -162,6 +164,8 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
     if (mounted) {
       setState(() {
         _cameraReady = false;
+        _faceDetected = false;
+        _detectedFaces = const <FaceEntity>[];
       });
     }
   }
@@ -192,9 +196,13 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
         result.fold(
           (error) {
             debugPrint('❌ Face detection error: $error');
-            if (_scanErrorMessage != error) {
+            if (_scanErrorMessage != error ||
+                _faceDetected ||
+                _detectedFaces.isNotEmpty) {
               setState(() {
                 _scanErrorMessage = error;
+                _faceDetected = false;
+                _detectedFaces = const <FaceEntity>[];
               });
             }
           },
@@ -205,9 +213,18 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
               });
             }
             final detected = faces.isNotEmpty;
-            if (detected != _faceDetected) {
-              setState(() => _faceDetected = detected);
-              debugPrint('👤 Face detected: $detected');
+            final detectionChanged = detected != _faceDetected;
+            final facesChanged = detected
+                ? _detectedFaces != faces
+                : _detectedFaces.isNotEmpty;
+            if (detectionChanged || facesChanged) {
+              setState(() {
+                _faceDetected = detected;
+                _detectedFaces = List<FaceEntity>.unmodifiable(faces);
+              });
+              if (detectionChanged) {
+                debugPrint('👤 Face detected: $detected');
+              }
             }
 
             if (detected) {
@@ -399,6 +416,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
       _step = _Step.scan;
       _livenessStep = _LivenessStep.straight;
       _faceDetected = false;
+      _detectedFaces = const <FaceEntity>[];
       _previousFace = null;
       _cameraReady = false;
       _cameraError = false;
@@ -420,6 +438,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
       _step = _Step.input;
       _livenessStep = _LivenessStep.straight;
       _faceDetected = false;
+      _detectedFaces = const <FaceEntity>[];
       _previousFace = null;
       _scanProgress = 0;
       _scanErrorMessage = null;
@@ -516,6 +535,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
             cameraError: _cameraError,
             scanErrorMessage: _scanErrorMessage,
             faceDetected: _faceDetected,
+            faces: _detectedFaces,
             pulseAnim: _pulse,
             shimmerAnim: _shimmer,
             scanProgress: _scanProgress,
@@ -741,6 +761,7 @@ class _ScanStep extends StatelessWidget {
     required this.cameraError,
     required this.scanErrorMessage,
     required this.faceDetected,
+    required this.faces,
     required this.pulseAnim,
     required this.shimmerAnim,
     required this.scanProgress,
@@ -753,6 +774,7 @@ class _ScanStep extends StatelessWidget {
   final bool cameraError;
   final String? scanErrorMessage;
   final bool faceDetected;
+  final List<FaceEntity> faces;
   final Animation<double> pulseAnim;
   final Animation<double> shimmerAnim;
   final double scanProgress;
@@ -844,6 +866,7 @@ class _ScanStep extends StatelessWidget {
                       cameraError: cameraError,
                       hasError: hasError,
                       faceDetected: faceDetected,
+                      faces: faces,
                       shimmerAnim: shimmerAnim,
                       progress: scanProgress,
                     ),
@@ -880,6 +903,7 @@ class _OvalCameraViewport extends StatelessWidget {
     required this.cameraError,
     required this.hasError,
     required this.faceDetected,
+    required this.faces,
     required this.shimmerAnim,
     required this.progress,
   });
@@ -889,6 +913,7 @@ class _OvalCameraViewport extends StatelessWidget {
   final bool cameraError;
   final bool hasError;
   final bool faceDetected;
+  final List<FaceEntity> faces;
   final Animation<double> shimmerAnim;
   final double progress;
 
@@ -896,11 +921,11 @@ class _OvalCameraViewport extends StatelessWidget {
   Widget build(BuildContext context) {
     final width = 260.w;
     final height = 340.w;
-    final borderColor = hasError
-        ? Colors.redAccent
-        : (faceDetected ? _kAccent : Colors.white30);
     final progressColor = hasError ? Colors.redAccent : _kAccent;
-    final strokeW = faceDetected ? 3.5 : 2.0;
+    final previewSize = cameraCtrl?.value.previewSize;
+    final overlayImageSize = previewSize == null
+        ? Size(width, height)
+        : Size(previewSize.height, previewSize.width);
 
     return Stack(
       children: [
@@ -929,6 +954,25 @@ class _OvalCameraViewport extends StatelessWidget {
           ),
         ),
 
+        Center(
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: CustomPaint(
+              painter: FaceOverlayPainter(
+                faces: faces,
+                imageSize: overlayImageSize,
+                rotation: cameraCtrl?.description.sensorOrientation ?? 0,
+                isFrontCamera:
+                    cameraCtrl?.description.lensDirection ==
+                    CameraLensDirection.front,
+                ellipseWidthFactor: 1,
+                ellipseHeightFactor: 1,
+              ),
+            ),
+          ),
+        ),
+
         // 3. UI Overlays (Borders, Progress, Silhouette)
         Center(
           child: SizedBox(
@@ -937,17 +981,6 @@ class _OvalCameraViewport extends StatelessWidget {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                // Oval border
-                CustomPaint(
-                  size: Size(width, height),
-                  painter: _OvalBorderPainter(
-                    color: borderColor,
-                    strokeWidth: strokeW,
-                    shimmerValue: faceDetected ? shimmerAnim.value : null,
-                    accentColor: _kAccent,
-                  ),
-                ),
-
                 // Progress Ring
                 CustomPaint(
                   size: Size(width, height),
@@ -1521,54 +1554,8 @@ class _GradientButton extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Oval Border & Progress Painters
+// Oval Progress Painters
 // ─────────────────────────────────────────────────────────────────────────────
-
-class _OvalBorderPainter extends CustomPainter {
-  const _OvalBorderPainter({
-    required this.color,
-    required this.strokeWidth,
-    required this.accentColor,
-    this.shimmerValue,
-  });
-
-  final Color color;
-  final double strokeWidth;
-  final Color accentColor;
-  final double? shimmerValue;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = strokeWidth
-      ..style = PaintingStyle.stroke;
-
-    canvas.drawOval(rect, paint);
-
-    if (shimmerValue != null) {
-      final shimmerPaint = Paint()
-        ..shader = SweepGradient(
-          colors: [
-            Colors.transparent,
-            accentColor.withOpacity(0.6),
-            Colors.transparent,
-          ],
-          stops: const [0.0, 0.5, 1.0],
-          transform: GradientRotation(shimmerValue! * 2 * 3.14159),
-        ).createShader(rect)
-        ..strokeWidth = strokeWidth + 1.5
-        ..style = PaintingStyle.stroke;
-
-      canvas.drawOval(rect, shimmerPaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_OvalBorderPainter old) =>
-      old.shimmerValue != shimmerValue || old.color != color;
-}
 
 class _ProgressPainter extends CustomPainter {
   const _ProgressPainter({required this.progress, required this.color});

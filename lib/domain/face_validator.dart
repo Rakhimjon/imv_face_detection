@@ -1,4 +1,3 @@
-
 import 'package:face_imv/domain/face_entity.dart';
 
 class FaceValidationResult {
@@ -72,7 +71,7 @@ class FaceValidator {
     final roll = face.roll;
 
     if (yaw.abs() > _maxValidYaw) {
-      errors.add('Head turned too far (Yaw: ${yaw.toStringAsFixed(1)}°)');
+      errors.add('Bosh juda ko\'p burilgan (Yaw: ${yaw.toStringAsFixed(1)}°)');
       confidenceScore -= 25;
     } else if (yaw.abs() > _warnYaw) {
       warnings.add('Head slightly turned (Yaw: ${yaw.toStringAsFixed(1)}°)');
