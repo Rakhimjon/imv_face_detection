@@ -27,7 +27,7 @@ dependencies:
   fpdart: ^1.2.0
   image: ^4.1.3
   tflite_flutter: ^0.12.1
-  rename: ^3.0.1
+  fluttertoast: ^9.0.0
 
 dev_dependencies:
   flutter_test:

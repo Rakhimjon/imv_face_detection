@@ -1,6 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -15,17 +13,18 @@ class MLKitFaceDetector implements IFaceDetector {
   bool _isProcessing = false;
 
   MLKitFaceDetector({ml_kit.FaceDetectorOptions? options})
-      : _detector = ml_kit.FaceDetector(
-          options: options ??
-              ml_kit.FaceDetectorOptions(
-                enableLandmarks: true,
-                enableClassification: true,
-                enableTracking: true,
-                enableContours: true,
-                minFaceSize: 0.15,
-                performanceMode: ml_kit.FaceDetectorMode.accurate,
-              ),
-        );
+    : _detector = ml_kit.FaceDetector(
+        options:
+            options ??
+            ml_kit.FaceDetectorOptions(
+              enableLandmarks: true,
+              enableClassification: true,
+              enableTracking: true,
+              enableContours: true,
+              minFaceSize: 0.08,
+              performanceMode: ml_kit.FaceDetectorMode.accurate,
+            ),
+      );
 
   @override
   Future<Either<String, List<FaceEntity>>> detectFromCameraImage(
@@ -58,8 +57,12 @@ class MLKitFaceDetector implements IFaceDetector {
       final rotation = _getImageRotation(camera.sensorOrientation);
 
       if (Platform.isAndroid) {
-        final bytes = _convertYUV420ToNV21(image);
-        
+        final bytes = _androidImageToNv21Bytes(image);
+        if (bytes == null) {
+      
+          return null;
+        }
+
         final metadata = ml_kit.InputImageMetadata(
           size: Size(image.width.toDouble(), image.height.toDouble()),
           rotation: rotation,
@@ -67,13 +70,10 @@ class MLKitFaceDetector implements IFaceDetector {
           bytesPerRow: image.width,
         );
 
-        return ml_kit.InputImage.fromBytes(
-          bytes: bytes,
-          metadata: metadata,
-        );
+        return ml_kit.InputImage.fromBytes(bytes: bytes, metadata: metadata);
       } else if (Platform.isIOS) {
         final bytes = image.planes[0].bytes;
-        
+
         final metadata = ml_kit.InputImageMetadata(
           size: Size(image.width.toDouble(), image.height.toDouble()),
           rotation: rotation,
@@ -81,29 +81,40 @@ class MLKitFaceDetector implements IFaceDetector {
           bytesPerRow: image.planes[0].bytesPerRow,
         );
 
-        return ml_kit.InputImage.fromBytes(
-          bytes: bytes,
-          metadata: metadata,
-        );
+        return ml_kit.InputImage.fromBytes(bytes: bytes, metadata: metadata);
       }
       return null;
     } catch (e) {
-      debugPrint('Image conversion error: $e');
       return null;
     }
+  }
+
+  Uint8List? _androidImageToNv21Bytes(CameraImage image) {
+    if (image.planes.isEmpty) return null;
+
+    // Many Android devices return NV21 in a single plane when requested.
+    if (image.planes.length == 1) {
+      return image.planes.first.bytes;
+    }
+
+    if (image.planes.length >= 3) {
+      return _convertYUV420ToNV21(image);
+    }
+
+    return null;
   }
 
   Uint8List _convertYUV420ToNV21(CameraImage image) {
     final width = image.width;
     final height = image.height;
-    
+
     // 🔧 FIXED: yPlane = (was yPimage.planes[0])
     final yPlane = image.planes[0];
     final uPlane = image.planes[1];
     final vPlane = image.planes[2];
 
     final nv21 = Uint8List(width * height + (width * height ~/ 2));
-    
+
     // Copy Y plane
     final yBytes = yPlane.bytes;
     for (int i = 0; i < width * height; i++) {
@@ -114,20 +125,21 @@ class MLKitFaceDetector implements IFaceDetector {
     int uvIndex = width * height;
     final uBytes = uPlane.bytes;
     final vBytes = vPlane.bytes;
-    
+
     final uvWidth = width ~/ 2;
     final uvHeight = height ~/ 2;
-    
+
     for (int row = 0; row < uvHeight; row++) {
       for (int col = 0; col < uvWidth; col++) {
-        final uvIndexSrc = row * uPlane.bytesPerRow + col * uPlane.bytesPerPixel!;
+        final uvPixelStride = uPlane.bytesPerPixel ?? 1;
+        final uvIndexSrc = row * uPlane.bytesPerRow + col * uvPixelStride;
         if (uvIndexSrc < uBytes.length && uvIndexSrc < vBytes.length) {
           nv21[uvIndex++] = vBytes[uvIndexSrc];
           nv21[uvIndex++] = uBytes[uvIndexSrc];
         }
       }
     }
-    
+
     return nv21;
   }
 
@@ -167,32 +179,26 @@ class MLKitFaceDetector implements IFaceDetector {
       final faces = await _detector.processImage(inputImage);
 
       // Quality filter
-      final validFaces = faces.where((face) => _isHighQualityFace(face)).toList();
+      final validFaces = faces
+          .where((face) => _isHighQualityFace(face))
+          .toList();
 
       final entities = validFaces.map(_mapToEntity).toList();
       return Right(entities);
     } catch (e) {
-      debugPrint('ML Kit Detection Error: $e');
+      //showError('ML Kit Detection Error: $e');
       return Left('ML Kit Detection Error: $e');
     }
   }
 
-  // Quality validation
   bool _isHighQualityFace(ml_kit.Face face) {
     final width = face.boundingBox.width;
     final height = face.boundingBox.height;
-    if (width < 60 || height < 60) return false;
-    
-    final leftEye = face.landmarks[ml_kit.FaceLandmarkType.leftEye];
-    final rightEye = face.landmarks[ml_kit.FaceLandmarkType.rightEye];
-    final nose = face.landmarks[ml_kit.FaceLandmarkType.noseBase];
-    
-    if (leftEye == null || rightEye == null || nose == null) return false;
-    
+    if (width < 40 || height < 40) return false;
     final yaw = face.headEulerAngleY?.abs() ?? 0;
     final pitch = face.headEulerAngleX?.abs() ?? 0;
-    if (yaw > 45 || pitch > 40) return false;
-    
+    if (yaw > 70 || pitch > 60) return false;
+
     return true;
   }
 
@@ -238,7 +244,6 @@ class MLKitFaceDetector implements IFaceDetector {
     );
   }
 
-  // 🔧 FIXED: ml_kit.FaceLandmarkType.bottomMouth (was FaceLanType)
   FaceLandmarkType? _mapLandmarkType(ml_kit.FaceLandmarkType type) {
     switch (type) {
       case ml_kit.FaceLandmarkType.bottomMouth:
@@ -264,8 +269,6 @@ class MLKitFaceDetector implements IFaceDetector {
     }
   }
 
-  // 🔧 FIXED: ml_kit.FaceContourType.face (was .e)
-  // 🔧 FIXED: rightEyebrowBottom (was rightEyebrowBttom)
   FaceContourType? _mapContourType(ml_kit.FaceContourType type) {
     switch (type) {
       case ml_kit.FaceContourType.face:

@@ -1,6 +1,6 @@
 # Coding Standards & Clean Code Rules
 
-To ensure a premium, maintainable codebase for **Xizmat Safari**, the following strict coding standards MUST be followed.
+To ensure a premium, maintainable codebase for **  **, the following strict coding standards MUST be followed.
 
 ## 🏛️ Class-Based Structure
 **Rule**: Prefer classes over top-level functions or variables for all logic, utilities, and constants.

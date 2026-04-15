@@ -1,10 +1,5 @@
-/// Face Validation Utility
-///
-/// Provides comprehensive validation logic to ensure detected faces
-/// are real human faces and meet quality standards for biometric verification.
 
-import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
-    as ml_kit;
+import 'package:face_imv/domain/face_entity.dart';
 
 class FaceValidationResult {
   final bool isValid;
@@ -32,32 +27,38 @@ FaceValidationResult(
 }
 
 class FaceValidator {
-  /// Validates if the detected face is a real human face with good quality
-  static FaceValidationResult validateHumanFace(ml_kit.Face face) {
+  static const double _minFaceSize = 50;
+  static const double _recommendedFaceSize = 80;
+  static const double _maxFaceSize = 380;
+  static const double _maxValidYaw = 35;
+  static const double _warnYaw = 22;
+  static const double _maxValidPitch = 30;
+  static const double _warnRoll = 22;
+  static const double _closedEyeThreshold = 0.2;
+
+  static FaceValidationResult validateHumanFace(FaceEntity face) {
     final warnings = <String>[];
     final errors = <String>[];
     double confidenceScore = 100.0;
 
-    // 1. Size Validation - Face must be large enough
-    final faceWidth = face.boundingBox.width;
-    final faceHeight = face.boundingBox.height;
+    final faceWidth = face.width;
+    final faceHeight = face.height;
 
-    if (faceWidth < 80 || faceHeight < 80) {
+    if (faceWidth < _minFaceSize || faceHeight < _minFaceSize) {
       errors.add(
         'Face too small (${faceWidth.toInt()}x${faceHeight.toInt()}px) - Move closer',
       );
       confidenceScore -= 30;
-    } else if (faceWidth < 120) {
+    } else if (faceWidth < _recommendedFaceSize) {
       warnings.add('Face somewhat small - Recommended to move closer');
       confidenceScore -= 10;
     }
 
-    if (faceWidth > 350 || faceHeight > 350) {
+    if (faceWidth > _maxFaceSize || faceHeight > _maxFaceSize) {
       errors.add('Face too large - Move back from camera');
       confidenceScore -= 20;
     }
 
-    // 2. Aspect Ratio - Face should have natural proportions
     final aspectRatio = faceWidth / faceHeight;
     if (aspectRatio < 0.6 || aspectRatio > 1.4) {
       warnings.add(
@@ -66,41 +67,39 @@ class FaceValidator {
       confidenceScore -= 15;
     }
 
-    // 3. Head Orientation - Face should be relatively straight
-    final yaw = face.headEulerAngleY ?? 0.0;
-    final pitch = face.headEulerAngleX ?? 0.0;
-    final roll = face.headEulerAngleZ ?? 0.0;
+    final yaw = face.yaw;
+    final pitch = face.pitch;
+    final roll = face.roll;
 
-    if (yaw.abs() > 30) {
+    if (yaw.abs() > _maxValidYaw) {
       errors.add('Head turned too far (Yaw: ${yaw.toStringAsFixed(1)}°)');
       confidenceScore -= 25;
-    } else if (yaw.abs() > 20) {
+    } else if (yaw.abs() > _warnYaw) {
       warnings.add('Head slightly turned (Yaw: ${yaw.toStringAsFixed(1)}°)');
       confidenceScore -= 10;
     }
 
-    if (pitch.abs() > 25) {
+    if (pitch.abs() > _maxValidPitch) {
       errors.add(
         'Head tilted too much up/down (Pitch: ${pitch.toStringAsFixed(1)}°)',
       );
       confidenceScore -= 20;
     }
 
-    if (roll.abs() > 20) {
+    if (roll.abs() > _warnRoll) {
       warnings.add('Head rolled (Roll: ${roll.toStringAsFixed(1)}°)');
       confidenceScore -= 10;
     }
-
-    // 4. Eye Detection - Both eyes should be detected and open
     final leftEye = face.leftEyeOpenProbability;
     final rightEye = face.rightEyeOpenProbability;
 
     if (leftEye == null || rightEye == null) {
-      errors.add('Eye data not available - Poor lighting or face obscured');
-      confidenceScore -= 40;
+      // Downgrade to warning — poor lighting should not hard-block detection.
+      warnings.add('Eye data unavailable — improve lighting');
+      confidenceScore -= 15;
     } else {
       // Check if eyes are closed (not blinking intentionally)
-      if (leftEye < 0.2 && rightEye < 0.2) {
+      if (leftEye < _closedEyeThreshold && rightEye < _closedEyeThreshold) {
         warnings.add('Both eyes appear closed');
         confidenceScore -= 15;
       }
@@ -131,22 +130,15 @@ class FaceValidator {
       confidenceScore -= 30;
     } else {
       // Check for essential landmarks
-      final hasLeftEye = face.landmarks.containsKey(
-        ml_kit.FaceLandmarkType.leftEye,
-      );
-      final hasRightEye = face.landmarks.containsKey(
-        ml_kit.FaceLandmarkType.rightEye,
-      );
-      final hasNose = face.landmarks.containsKey(
-        ml_kit.FaceLandmarkType.noseBase,
-      );
-      final hasMouth = face.landmarks.containsKey(
-        ml_kit.FaceLandmarkType.bottomMouth,
-      );
+      final hasLeftEye = face.hasLandmark(FaceLandmarkType.leftEye);
+      final hasRightEye = face.hasLandmark(FaceLandmarkType.rightEye);
+      final hasNose = face.hasLandmark(FaceLandmarkType.noseBase);
+      final hasMouth = face.hasLandmark(FaceLandmarkType.bottomMouth);
 
       if (!hasLeftEye || !hasRightEye) {
-        errors.add('Eyes not properly detected');
-        confidenceScore -= 35;
+        // Warn rather than error — face may still be usable.
+        warnings.add('Eyes not fully detected — adjust lighting');
+        confidenceScore -= 15;
       }
 
       if (!hasNose) {
@@ -167,7 +159,7 @@ class FaceValidator {
     confidenceScore = confidenceScore.clamp(0.0, 100.0);
 
     // Determine if valid based on confidence and errors
-    final isValid = errors.isEmpty && confidenceScore >= 60.0;
+    final isValid = errors.isEmpty && confidenceScore >= 45.0;
 
     return FaceValidationResult(
       isValid: isValid,
@@ -179,16 +171,16 @@ class FaceValidator {
 
   /// Validates liveness based on head movement sequence
   static bool validateLivenessSequence({
-    required ml_kit.Face currentFace,
-    required ml_kit.Face? previousFace,
+    required FaceEntity currentFace,
+    required FaceEntity? previousFace,
     required LivenessAction expectedAction,
   }) {
     if (previousFace == null) return false;
 
-    final currentYaw = currentFace.headEulerAngleY ?? 0.0;
-    final previousYaw = previousFace.headEulerAngleY ?? 0.0;
-    final currentPitch = currentFace.headEulerAngleX ?? 0.0;
-    final previousPitch = previousFace.headEulerAngleX ?? 0.0;
+    final currentYaw = currentFace.yaw;
+    final previousYaw = previousFace.yaw;
+    final currentPitch = currentFace.pitch;
+    final previousPitch = previousFace.pitch;
 
     switch (expectedAction) {
       case LivenessAction.turnLeft:
@@ -220,7 +212,7 @@ class FaceValidator {
   }
 
   /// Anti-spoofing check - detects unusual patterns
-  static bool isSuspiciousPattern(ml_kit.Face face) {
+  static bool isSuspiciousPattern(FaceEntity face) {
     // Check for perfectly still face (could be a photo)
     final leftEye = face.leftEyeOpenProbability ?? 0.5;
     final rightEye = face.rightEyeOpenProbability ?? 0.5;
@@ -231,9 +223,9 @@ class FaceValidator {
     }
 
     // Check for unnatural stillness
-    final yaw = face.headEulerAngleY ?? 0.0;
-    final pitch = face.headEulerAngleX ?? 0.0;
-    final roll = face.headEulerAngleZ ?? 0.0;
+    final yaw = face.yaw;
+    final pitch = face.pitch;
+    final roll = face.roll;
 
     if (yaw == 0.0 && pitch == 0.0 && roll == 0.0) {
       return true; // Suspicious: perfect alignment

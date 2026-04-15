@@ -1,11 +1,12 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:face_imv/application/camera_state.dart';
-import 'package:face_imv/application/face_detection_state.dart';
 import 'package:face_imv/injection.dart';
-import 'package:face_imv/presentation/core/app_colors.dart';
 import 'package:face_imv/presentation/pages/splash_page.dart';
+import 'package:flutter/material.dart';
+import 'package:face_imv/presentation/core/app_colors.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+
+import 'application/camera_state.dart';
+import 'application/face_detection_state.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,26 +23,24 @@ class FaceAnalyzerApp extends StatelessWidget {
       designSize: const Size(390, 844), // iPhone 13 size
       minTextAdapt: true,
       builder: (context, child) {
-        return MaterialApp(
-          title: 'Face_IMV',
-          debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            brightness: Brightness.dark,
-            scaffoldBackgroundColor: AppColors.background,
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: AppColors.primary,
+        return MultiBlocProvider(
+          providers: [
+            BlocProvider(create: (context) => getIt<CameraCubit>()),
+            BlocProvider(create: (context) => getIt<FaceDetectionCubit>()),
+          ],
+          child: MaterialApp(
+            title: 'Face_IMV',
+            debugShowCheckedModeBanner: false,
+            theme: ThemeData(
               brightness: Brightness.dark,
-            ),
-            useMaterial3: true,
-          ),
-          home: MultiBlocProvider(
-            providers: [
-              BlocProvider(
-                create: (context) => getIt<CameraCubit>()..initialize(),
+              scaffoldBackgroundColor: AppColors.background,
+              colorScheme: ColorScheme.fromSeed(
+                seedColor: AppColors.primary,
+                brightness: Brightness.dark,
               ),
-              BlocProvider(create: (context) => getIt<FaceDetectionCubit>()),
-            ],
-            child: const SplashPage(),
+              useMaterial3: true,
+            ),
+            home: const SplashPage(),
           ),
         );
       },

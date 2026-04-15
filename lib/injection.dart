@@ -8,9 +8,15 @@ final getIt = GetIt.instance;
 
 void setupDependencyInjection() {
   // Infrastructure
-  getIt.registerLazySingleton<IFaceDetector>(() => MLKitFaceDetector());
+  if (!getIt.isRegistered<IFaceDetector>()) {
+    getIt.registerFactory<IFaceDetector>(() => MLKitFaceDetector());
+  }
 
   // Application
-  getIt.registerFactory(() => CameraCubit());
-  getIt.registerFactory(() => FaceDetectionCubit(getIt<IFaceDetector>()));
+  if (!getIt.isRegistered<CameraCubit>()) {
+    getIt.registerFactory(() => CameraCubit());
+  }
+  if (!getIt.isRegistered<FaceDetectionCubit>()) {
+    getIt.registerFactory(() => FaceDetectionCubit(getIt<IFaceDetector>()));
+  }
 }

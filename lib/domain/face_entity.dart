@@ -49,5 +49,15 @@ enum FaceContourType {
   rightEyebrowBottom,
   rightEyebrowTop,
   upperLipBottom,
-  upperLipTop
+  upperLipTop,
+}
+
+extension FaceEntityMetrics on FaceEntity {
+  double get width => boundingBox.width;
+  double get height => boundingBox.height;
+  double get yaw => headEulerAngleY ?? 0.0;
+  double get pitch => headEulerAngleX ?? 0.0;
+  double get roll => headEulerAngleZ ?? 0.0;
+
+  bool hasLandmark(FaceLandmarkType type) => landmarks.containsKey(type);
 }

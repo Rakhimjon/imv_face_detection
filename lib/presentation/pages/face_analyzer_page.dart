@@ -1,17 +1,11 @@
-import 'dart:io';
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:face_imv/application/camera_state.dart';
 import 'package:face_imv/application/face_detection_state.dart';
 import 'package:face_imv/presentation/widgets/face_overlay_painter.dart';
-import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
-    as ml_kit;
 import 'package:face_imv/presentation/pages/myid_verification_page.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-
 
 class FaceAnalyzerPage extends StatefulWidget {
   const FaceAnalyzerPage({super.key});
@@ -23,141 +17,63 @@ class FaceAnalyzerPage extends StatefulWidget {
 class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
   bool _isProcessing = false;
   int _lastFrameTime = 0;
-  
-  // Track camera direction for overlay mirroring
   bool _isFrontCamera = true;
+  CameraController? _streamingController;
 
-  void _initStreaming(CameraController controller) {
-    if (controller.value.isStreamingImages) return;
-    
-    // Update camera direction
-    _isFrontCamera = controller.description.lensDirection == CameraLensDirection.front;
-    
-    controller.startImageStream((image) async {
-      if (_isProcessing) return;
-
-      // Throttle to ~15 FPS (66ms), but skip if still processing
-      final now = DateTime.now().millisecondsSinceEpoch;
-      if (now - _lastFrameTime < 66) return;
-      _lastFrameTime = now;
-
-      _isProcessing = true;
-      try {
-        final inputImage = _prepareInputImage(image, controller);
-        if (inputImage != null) {
-          await context.read<FaceDetectionCubit>().processImage(inputImage);
-        }
-      } catch (e) {
-        debugPrint('Error processing image stream: $e');
-      } finally {
-        _isProcessing = false;
-      }
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      context.read<CameraCubit>().initialize();
     });
   }
 
-  // 🔧 FIXED: Proper YUV handling for Android vs iOS
-  ml_kit.InputImage? _prepareInputImage(
-    CameraImage image,
-    CameraController controller,
-  ) {
-    try {
-      final rotation = _rotationFromSensor(
-        controller.description.sensorOrientation,
-      );
-      if (rotation == null) return null;
+  @override
+  void dispose() {
+    final controller = _streamingController;
+    _streamingController = null;
 
-      // Platform-specific format handling
-      if (Platform.isAndroid) {
-        // Android: Convert YUV420_888 to NV21 properly
-        final bytes = _convertYUV420ToNV21(image);
-        if (bytes == null) return null;
-
-        return ml_kit.InputImage.fromBytes(
-          bytes: bytes,
-          metadata: ml_kit.InputImageMetadata(
-            size: Size(image.width.toDouble(), image.height.toDouble()),
-            rotation: rotation,
-            format: ml_kit.InputImageFormat.nv21,
-            bytesPerRow: image.width,
-          ),
-        );
-      } else if (Platform.isIOS) {
-        // iOS: BGRA is already contiguous
-        if (image.planes.isEmpty) return null;
-        
-        return ml_kit.InputImage.fromBytes(
-          bytes: image.planes[0].bytes,
-          metadata: ml_kit.InputImageMetadata(
-            size: Size(image.width.toDouble(), image.height.toDouble()),
-            rotation: rotation,
-            format: ml_kit.InputImageFormat.bgra8888,
-            bytesPerRow: image.planes[0].bytesPerRow,
-          ),
-        );
-      }
-      return null;
-    } catch (e) {
-      debugPrint('Image preparation error: $e');
-      return null;
+    if (controller != null && controller.value.isStreamingImages) {
+      controller.stopImageStream().catchError((_) {});
     }
+
+    super.dispose();
   }
 
-  // 🔧 CRITICAL: Correct YUV420 to NV21 conversion
-  Uint8List? _convertYUV420ToNV21(CameraImage image) {
+  void _initStreaming(CameraController controller) {
+    if (_streamingController == controller ||
+        controller.value.isStreamingImages) {
+      return;
+    }
+
+    _streamingController = controller;
+    _isFrontCamera =
+        controller.description.lensDirection == CameraLensDirection.front;
+
     try {
-      final width = image.width;
-      final height = image.height;
-      final ySize = width * height;
-      
-      final uvWidth = width ~/ 2;
-      final uvHeight = height ~/ 2;
-      final uvSize = uvWidth * uvHeight;
-      
-      final nv21 = Uint8List(ySize + uvSize * 2);
-      
-      // Copy Y plane
-      final yPlane = image.planes[0];
-      final yBytes = yPlane.bytes;
-      for (int i = 0; i < ySize; i++) {
-        nv21[i] = yBytes[i];
-      }
-      
-      // Interleave U and V planes
-      final uPlane = image.planes[1];
-      final vPlane = image.planes[2];
-      
-      int uvIndex = ySize;
-      for (int row = 0; row < uvHeight; row++) {
-        for (int col = 0; col < uvWidth; col++) {
-          final uIndex = row * uPlane.bytesPerRow + col * uPlane.bytesPerPixel!;
-          final vIndex = row * vPlane.bytesPerRow + col * vPlane.bytesPerPixel!;
-          
-          if (uIndex < uPlane.bytes.length && vIndex < vPlane.bytes.length) {
-            nv21[uvIndex++] = vPlane.bytes[vIndex]; // V first
-            nv21[uvIndex++] = uPlane.bytes[uIndex]; // Then U
-          }
+      controller.startImageStream((image) async {
+        if (_isProcessing) return;
+
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now - _lastFrameTime < 66) return;
+        _lastFrameTime = now;
+
+        _isProcessing = true;
+        try {
+          await context.read<FaceDetectionCubit>().processCameraImage(
+            image,
+            controller.description,
+          );
+        } catch (e) {
+          debugPrint('Error processing image stream: $e');
+        } finally {
+          _isProcessing = false;
         }
-      }
-      
-      return nv21;
+      });
     } catch (e) {
-      debugPrint('YUV conversion error: $e');
-      return null;
-    }
-  }
-
-  ml_kit.InputImageRotation? _rotationFromSensor(int sensorOrientation) {
-    switch (sensorOrientation) {
-      case 0:
-        return ml_kit.InputImageRotation.rotation0deg;
-      case 90:
-        return ml_kit.InputImageRotation.rotation90deg;
-      case 180:
-        return ml_kit.InputImageRotation.rotation180deg;
-      case 270:
-        return ml_kit.InputImageRotation.rotation270deg;
-      default:
-        return null;
+      debugPrint('Error starting image stream: $e');
+      _streamingController = null;
     }
   }
 
@@ -165,7 +81,15 @@ class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: BlocBuilder<CameraCubit, CameraState>(
+      body: BlocConsumer<CameraCubit, CameraState>(
+        listener: (context, state) {
+          final controller = state.controller;
+          if (controller != null && controller.value.isInitialized) {
+            _initStreaming(controller);
+          } else {
+            _streamingController = null;
+          }
+        },
         builder: (context, state) {
           if (state.status.isLoading) {
             return const Center(child: CircularProgressIndicator());
@@ -177,19 +101,12 @@ class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
               state.controller!.value.isInitialized) {
             return Stack(
               children: [
-                // ① Full-screen camera feed
-                _CameraPreviewLayer(
-                  controller: state.controller!,
-                  onStream: _initStreaming,
-                ),
-                // ② ML face-landmark overlay (FIXED: Pass front camera flag)
+                _CameraPreviewLayer(controller: state.controller!),
                 _FaceOverlayLayer(
                   controller: state.controller!,
                   isFrontCamera: _isFrontCamera,
                 ),
-                // ③ Status badge + camera-switch button
                 const _AnalyzerHeader(),
-                // ④ Face metrics panel
                 const _AnalyzerFooter(),
               ],
             );
@@ -204,28 +121,16 @@ class _FaceAnalyzerPageState extends State<FaceAnalyzerPage> {
 // ─── ① Camera preview ───────────────────────────────────────────────────────
 
 class _CameraPreviewLayer extends StatelessWidget {
-  const _CameraPreviewLayer({required this.controller, required this.onStream});
+  const _CameraPreviewLayer({required this.controller});
 
   final CameraController controller;
-  final void Function(CameraController) onStream;
 
   @override
   Widget build(BuildContext context) {
     return Positioned.fill(
       child: AspectRatio(
         aspectRatio: controller.value.aspectRatio,
-        child: CameraPreview(
-          controller,
-          child: LayoutBuilder(
-            builder: (context, _) {
-              // Defer stream initialization to avoid build-phase side effects
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                onStream(controller);
-              });
-              return const SizedBox.expand();
-            },
-          ),
-        ),
+        child: CameraPreview(controller),
       ),
     );
   }
@@ -248,7 +153,7 @@ class _FaceOverlayLayer extends StatelessWidget {
       builder: (context, state) {
         // Don't rebuild if no faces (performance)
         if (state.faces.isEmpty) return const SizedBox.shrink();
-        
+
         return Positioned.fill(
           child: CustomPaint(
             painter: FaceOverlayPainter(
@@ -342,7 +247,9 @@ class _AnalyzerHeader extends StatelessWidget {
               ),
               SizedBox(width: 8.w),
               IconButton(
-                onPressed: () => context.read<CameraCubit>().switchCamera(), // 🔧 FIXED: cext -> context
+                onPressed: () => context
+                    .read<CameraCubit>()
+                    .switchCamera(), // 🔧 FIXED: cext -> context
                 icon: const Icon(Icons.flip_camera_ios, color: Colors.white),
                 style: IconButton.styleFrom(backgroundColor: Colors.black54),
               ),
@@ -397,18 +304,27 @@ class _AnalyzerFooter extends StatelessWidget {
             final smilePct = '${(smile * 100).toStringAsFixed(0)}%';
             final yaw = face.headEulerAngleY ?? 0.0;
             String directionY = "Facing CENTER ✅";
-            if (yaw < -20) directionY = "Turning LEFT ⬅️";
-            else if (yaw > 20) directionY = "Turning RIGHT ➡️";
-            
+            if (yaw < -20) {
+              directionY = "Turning LEFT ⬅️";
+            } else if (yaw > 20) {
+              directionY = "Turning RIGHT ➡️";
+            }
+
             final pitch = face.headEulerAngleX ?? 0.0;
             String directionX = "Looking CENTER";
-            if (pitch < -15) directionX = "Looking DOWN ⬇️";
-            else if (pitch > 15) directionX = "Looking UP ⬆️";
+            if (pitch < -15) {
+              directionX = "Looking DOWN ⬇️";
+            } else if (pitch > 15) {
+              directionX = "Looking UP ⬆️";
+            }
 
             final width = face.boundingBox.width;
             String distance = "🟢 PERFECT DISTANCE";
-            if (width > 280) distance = "🔴 TOO CLOSE — Move Back"; // 🔧 FIXED: wid280 -> width > 280
-            else if (width < 100) distance = "🟡 TOO FAR — Move Closer";
+            if (width > 280) {
+              distance = "🔴 TOO CLOSE — Move Back";
+            } else if (width < 100) {
+              distance = "🟡 TOO FAR — Move Closer";
+            }
 
             return Column(
               mainAxisSize: MainAxisSize.min,

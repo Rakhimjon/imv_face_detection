@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:camera/camera.dart';
+import 'package:face_imv/domain/face_entity.dart';
+import 'package:face_imv/domain/i_face_detector.dart';
 import 'package:face_imv/domain/face_validator.dart';
+import 'package:face_imv/injection.dart';
+import 'package:face_imv/presentation/core/toast_ext.dart';
+import 'package:face_imv/application/camera_state.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
-import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
-    as ml_kit;
 
 // ─── Page entry point ────────────────────────────────────────────────────────
 
@@ -43,19 +47,12 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   bool _cameraError = false;
   bool _isProcessing = false;
   bool _faceDetected = false;
+  String? _scanErrorMessage;
   double _scanProgress = 0.0;
   Timer? _analysisTimer;
-
-  final _faceDetector = ml_kit.FaceDetector(
-    options: ml_kit.FaceDetectorOptions(
-      enableContours: true,
-      enableLandmarks: true,
-      enableClassification: true,
-      enableTracking: true,
-      minFaceSize: 0.15,
-      performanceMode: ml_kit.FaceDetectorMode.accurate,
-    ),
-  );
+  int _lastFrameTime = 0;
+  FaceEntity? _previousFace;
+  late final IFaceDetector _faceDetector;
 
   // --- animations ---
   late final AnimationController _pulseCtrl;
@@ -69,6 +66,10 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   @override
   void initState() {
     super.initState();
+    _faceDetector = getIt<IFaceDetector>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _releaseSharedCameraIfAny();
+    });
     _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1600),
@@ -93,7 +94,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
     _passportController.dispose();
     _dobController.dispose();
     _cameraController?.dispose();
-    _faceDetector.close();
+    _faceDetector.dispose();
     _pulseCtrl.dispose();
     _shimmerCtrl.dispose();
     _analysisTimer?.cancel();
@@ -102,8 +103,17 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
 
   // ─── Camera lifecycle ─────────────────────────────────────────────────────
 
+  Future<void> _releaseSharedCameraIfAny() async {
+    try {
+      await context.read<CameraCubit>().stopCamera();
+    } catch (_) {
+      // This page can still run even if CameraCubit is not in scope.
+    }
+  }
+
   Future<void> _startCamera() async {
     try {
+      await _releaseSharedCameraIfAny();
       await _stopCamera(); // Safety first
 
       _cameras = await availableCameras();
@@ -122,11 +132,20 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
 
       await _cameraController!.initialize();
       if (!mounted) return;
-      setState(() => _cameraReady = true);
+      setState(() {
+        _cameraReady = true;
+        _cameraError = false;
+        _scanErrorMessage = null;
+      });
       _startFaceStream();
     } catch (e) {
-      debugPrint('Camera init error: $e');
-      if (mounted) setState(() => _cameraError = true);
+      if (mounted) {
+        setState(() {
+          _cameraError = true;
+          _scanErrorMessage =
+              'Kamera ishga tushmadi. Ruxsat va qurilma kamerasini tekshiring.';
+        });
+      }
     }
   }
 
@@ -148,8 +167,9 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   }
 
   void _startFaceStream() {
-    if (_cameraController == null || !_cameraController!.value.isInitialized)
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
       return;
+    }
 
     debugPrint(
       '🎥 Starting face detection stream for liveness verification...',
@@ -157,26 +177,46 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
 
     _cameraController!.startImageStream((image) async {
       if (_isProcessing || _step != _Step.scan) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastFrameTime < 80) return;
+
+      _lastFrameTime = now;
       _isProcessing = true;
       try {
-        final inputImage = _toInputImage(image);
-        if (inputImage != null) {
-          final faces = await _faceDetector.processImage(inputImage);
-          if (mounted) {
+        final result = await _faceDetector.detectFromCameraImage(
+          image,
+          _cameraController!.description,
+        );
+        if (!mounted) return;
+
+        result.fold(
+          (error) {
+            debugPrint('❌ Face detection error: $error');
+            if (_scanErrorMessage != error) {
+              setState(() {
+                _scanErrorMessage = error;
+              });
+            }
+          },
+          (faces) {
+            if (_scanErrorMessage != null) {
+              setState(() {
+                _scanErrorMessage = null;
+              });
+            }
             final detected = faces.isNotEmpty;
             if (detected != _faceDetected) {
               setState(() => _faceDetected = detected);
               debugPrint('👤 Face detected: $detected');
             }
 
-            // Liveness sequence
             if (detected) {
               final face = faces.first;
-              final yaw = face.headEulerAngleY ?? 0.0;
-              final pitch = face.headEulerAngleX ?? 0.0;
+              final yaw = face.yaw;
+              final pitch = face.pitch;
               final leftEye = face.leftEyeOpenProbability ?? 1.0;
               final rightEye = face.rightEyeOpenProbability ?? 1.0;
-              final faceWidth = face.boundingBox.width;
+              final faceWidth = face.width;
               final validation = FaceValidator.validateHumanFace(face);
 
               debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -203,7 +243,9 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
                 '  📈 Progress:        ${(_scanProgress * 100).toStringAsFixed(0)}%',
               );
               if (validation.warnings.isNotEmpty) {
-                debugPrint('  ⚠️  Warnings: ${validation.warnings.join(" | ")}');
+                debugPrint(
+                  '  ⚠️  Warnings: ${validation.warnings.join(" | ")}',
+                );
               }
               if (validation.errors.isNotEmpty) {
                 debugPrint('  ❌ Errors:   ${validation.errors.join(" | ")}');
@@ -212,6 +254,12 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
               if (!validation.isValid) {
                 debugPrint('\n⏳ WAITING - Face quality is not sufficient yet');
                 debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+                if (validation.errors.isNotEmpty) {
+                  if (mounted) {
+                    context.showErrorToast(validation.errors.first);
+                  }
+                }
+                _previousFace = face;
                 return;
               }
 
@@ -228,73 +276,96 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
                 } else {
                   debugPrint('   ⏳ WAITING - Straighten your head');
                 }
-              } else if (_livenessStep == _LivenessStep.blink) {
-                debugPrint('\n👁️  STEP 2: Checking for BLINK...');
-                debugPrint('   Required: Both eyes < 35% open');
-                debugPrint(
-                  '   Left Eye:  ${(leftEye * 100).toStringAsFixed(1)}%',
-                );
-                debugPrint(
-                  '   Right Eye: ${(rightEye * 100).toStringAsFixed(1)}%',
-                );
-                if (leftEye < 0.35 && rightEye < 0.35) {
-                  debugPrint('   ✅ BLINK DETECTED - Moving to LEFT turn');
-                  setState(() {
-                    _scanProgress = 0.50;
-                    _livenessStep = _LivenessStep.left;
-                  });
-                } else {
-                  debugPrint('   ⏳ WAITING - Please blink');
-                }
-              } else if (_livenessStep == _LivenessStep.left) {
-                debugPrint('\n⬅️  STEP 3: Checking LEFT turn...');
-                debugPrint('   Required: Yaw < -15°');
-                debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
-                if (yaw < -15) {
-                  debugPrint('   ✅ LEFT TURN VERIFIED - Moving to RIGHT turn');
-                  setState(() {
-                    _scanProgress = 0.75;
-                    _livenessStep = _LivenessStep.right;
-                  });
-                } else {
-                  debugPrint('   ⏳ WAITING - Turn head left');
-                }
-              } else if (_livenessStep == _LivenessStep.right) {
-                debugPrint('\n➡️  STEP 4: Checking RIGHT turn...');
-                debugPrint('   Required: Yaw > 15°');
-                debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
-                if (yaw > 15) {
+              } else {
+                if (_livenessStep == _LivenessStep.blink) {
+                  debugPrint('\n👁️  STEP 2: Checking for BLINK...');
+                  debugPrint('   Required: Both eyes < 35% open');
                   debugPrint(
-                    '   ✅ RIGHT TURN VERIFIED - Liveness COMPLETE! 🎉',
+                    '   Left Eye:  ${(leftEye * 100).toStringAsFixed(1)}%',
                   );
-                  setState(() {
-                    _scanProgress = 1.0;
-                    _livenessStep = _LivenessStep.done;
-                  });
-                } else {
-                  debugPrint('   ⏳ WAITING - Turn head right');
-                }
-              } else if (_livenessStep == _LivenessStep.done) {
-                if (_step == _Step.scan) {
-                  debugPrint('\n🎉 ALL LIVENESS STEPS COMPLETED!');
-                  debugPrint('🔬 Starting deep analysis...');
-                  _startDeepAnalysis();
+                  debugPrint(
+                    '   Right Eye: ${(rightEye * 100).toStringAsFixed(1)}%',
+                  );
+                  if (FaceValidator.validateLivenessSequence(
+                    currentFace: face,
+                    previousFace: _previousFace,
+                    expectedAction: LivenessAction.blink,
+                  )) {
+                    debugPrint('   ✅ BLINK DETECTED - Moving to LEFT turn');
+                    setState(() {
+                      _scanProgress = 0.50;
+                      _livenessStep = _LivenessStep.left;
+                    });
+                  } else {
+                    debugPrint('   ⏳ WAITING - Please blink');
+                  }
+                } else if (_livenessStep == _LivenessStep.left) {
+                  debugPrint('\n⬅️  STEP 3: Checking LEFT turn...');
+                  debugPrint('   Required: Yaw < -15°');
+                  debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
+                  if (FaceValidator.validateLivenessSequence(
+                    currentFace: face,
+                    previousFace: _previousFace,
+                    expectedAction: LivenessAction.turnLeft,
+                  )) {
+                    debugPrint(
+                      '   ✅ LEFT TURN VERIFIED - Moving to RIGHT turn',
+                    );
+                    setState(() {
+                      _scanProgress = 0.75;
+                      _livenessStep = _LivenessStep.right;
+                    });
+                  } else {
+                    debugPrint('   ⏳ WAITING - Turn head left');
+                  }
+                } else if (_livenessStep == _LivenessStep.right) {
+                  debugPrint('\n➡️  STEP 4: Checking RIGHT turn...');
+                  debugPrint('   Required: Yaw > 15°');
+                  debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
+                  if (FaceValidator.validateLivenessSequence(
+                    currentFace: face,
+                    previousFace: _previousFace,
+                    expectedAction: LivenessAction.turnRight,
+                  )) {
+                    debugPrint(
+                      '   ✅ RIGHT TURN VERIFIED - Liveness COMPLETE! 🎉',
+                    );
+                    setState(() {
+                      _scanProgress = 1.0;
+                      _livenessStep = _LivenessStep.done;
+                    });
+                  } else {
+                    debugPrint('   ⏳ WAITING - Turn head right');
+                  }
+                } else if (_livenessStep == _LivenessStep.done) {
+                  if (_step == _Step.scan) {
+                    debugPrint('\n🎉 ALL LIVENESS STEPS COMPLETED!');
+                    debugPrint('🔬 Starting deep analysis...');
+                    _startDeepAnalysis();
+                  }
                 }
               }
+              _previousFace = face;
               debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
             } else {
               if (_faceDetected) {
                 debugPrint('⚠️  Face lost - Resetting liveness check');
               }
+              _previousFace = null;
               setState(() {
                 _scanProgress = 0;
                 _livenessStep = _LivenessStep.straight;
               });
             }
-          }
-        }
+          },
+        );
       } catch (e) {
         debugPrint('❌ Error in face stream: $e');
+        if (_scanErrorMessage != 'Face stream xatosi: $e') {
+          setState(() {
+            _scanErrorMessage = 'Face stream xatosi: $e';
+          });
+        }
       } finally {
         _isProcessing = false;
       }
@@ -320,61 +391,6 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
     });
   }
 
-  ml_kit.InputImage? _toInputImage(CameraImage image) {
-    if (_cameraController == null) return null;
-
-    final rotation = _getRotation(
-      _cameraController!.description.sensorOrientation,
-    );
-    if (rotation == null) return null;
-
-    // Get the InputImageFormat based on platform and raw format
-    final format =
-        ml_kit.InputImageFormatValue.fromRawValue(image.format.raw) ??
-        (Platform.isAndroid
-            ? ml_kit.InputImageFormat.nv21
-            : ml_kit.InputImageFormat.bgra8888);
-
-    // Validate that the format is supported by ML Kit on the respective platform
-    if ((Platform.isAndroid && format != ml_kit.InputImageFormat.nv21) ||
-        (Platform.isIOS && format != ml_kit.InputImageFormat.bgra8888)) {
-      return null;
-    }
-
-    if (image.planes.isEmpty) return null;
-
-    final WriteBuffer allBytes = WriteBuffer();
-    for (final Plane plane in image.planes) {
-      allBytes.putUint8List(plane.bytes);
-    }
-    final bytes = allBytes.done().buffer.asUint8List();
-
-    return ml_kit.InputImage.fromBytes(
-      bytes: bytes,
-      metadata: ml_kit.InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
-      ),
-    );
-  }
-
-  ml_kit.InputImageRotation? _getRotation(int sensorOrientation) {
-    switch (sensorOrientation) {
-      case 0:
-        return ml_kit.InputImageRotation.rotation0deg;
-      case 90:
-        return ml_kit.InputImageRotation.rotation90deg;
-      case 180:
-        return ml_kit.InputImageRotation.rotation180deg;
-      case 270:
-        return ml_kit.InputImageRotation.rotation270deg;
-      default:
-        return null;
-    }
-  }
-
   // ─── Navigation between steps ─────────────────────────────────────────────
 
   void _goToScan() {
@@ -383,8 +399,10 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
       _step = _Step.scan;
       _livenessStep = _LivenessStep.straight;
       _faceDetected = false;
+      _previousFace = null;
       _cameraReady = false;
       _cameraError = false;
+      _scanErrorMessage = null;
     });
     _startCamera();
   }
@@ -402,6 +420,9 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
       _step = _Step.input;
       _livenessStep = _LivenessStep.straight;
       _faceDetected = false;
+      _previousFace = null;
+      _scanProgress = 0;
+      _scanErrorMessage = null;
     });
   }
 
@@ -436,13 +457,13 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: ColorScheme.dark(
+            colorScheme: ColorScheme.light(
               primary: _kAccent,
               onPrimary: Colors.white,
-              surface: const Color(0xFF1A1E2E),
-              onSurface: Colors.white,
+              surface: Colors.white,
+              onSurface: _kTextPrimary,
             ),
-            dialogBackgroundColor: const Color(0xFF1A1E2E),
+            dialogBackgroundColor: Colors.white,
           ),
           child: child!,
         );
@@ -493,6 +514,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
             cameraCtrl: _cameraController,
             cameraReady: _cameraReady,
             cameraError: _cameraError,
+            scanErrorMessage: _scanErrorMessage,
             faceDetected: _faceDetected,
             pulseAnim: _pulse,
             shimmerAnim: _shimmer,
@@ -522,10 +544,12 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
 
   AppBar _buildAppBar() {
     return AppBar(
-      backgroundColor: Colors.transparent,
+      backgroundColor: Colors.white,
       elevation: 0,
+      surfaceTintColor: Colors.white,
+      shadowColor: Colors.black12,
       leading: IconButton(
-        icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white70),
+        icon: Icon(Icons.arrow_back_ios_new, color: _kTextPrimary, size: 20.sp),
         onPressed: () {
           if (_step == _Step.scan) {
             _stopCamera();
@@ -557,14 +581,14 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
           Text(
             'ID  Verification',
             style: TextStyle(
-              color: Colors.white,
+              color: _kTextPrimary,
               fontWeight: FontWeight.w600,
               fontSize: 16.sp,
             ),
           ),
         ],
       ),
-      systemOverlayStyle: SystemUiOverlayStyle.light,
+      systemOverlayStyle: SystemUiOverlayStyle.dark,
     );
   }
 }
@@ -607,20 +631,20 @@ class _InputStep extends StatelessWidget {
                 height: 88.w,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  gradient: _kGradient,
+                  color: _kAccent.withOpacity(0.10),
+                  border: Border.all(
+                    color: _kAccent.withOpacity(0.25),
+                    width: 1.5,
+                  ),
                   boxShadow: [
                     BoxShadow(
-                      color: _kAccent.withOpacity(0.4),
-                      blurRadius: 28,
-                      spreadRadius: 4,
+                      color: _kAccent.withOpacity(0.12),
+                      blurRadius: 24,
+                      spreadRadius: 2,
                     ),
                   ],
                 ),
-                child: Icon(
-                  Icons.badge_outlined,
-                  color: Colors.white,
-                  size: 42.sp,
-                ),
+                child: Icon(Icons.badge_outlined, color: _kAccent, size: 42.sp),
               ),
             ),
             SizedBox(height: 20.h),
@@ -629,7 +653,7 @@ class _InputStep extends StatelessWidget {
               child: Text(
                 'Шахсни тасдиқлаш',
                 style: TextStyle(
-                  color: Colors.white,
+                  color: _kTextPrimary,
                   fontSize: 20.sp,
                   fontWeight: FontWeight.w700,
                   letterSpacing: 0.3,
@@ -639,7 +663,7 @@ class _InputStep extends StatelessWidget {
             Center(
               child: Text(
                 'Passport ma\'lumotlarini kiriting',
-                style: TextStyle(color: Colors.white54, fontSize: 13.sp),
+                style: TextStyle(color: _kTextSecondary, fontSize: 13.sp),
               ),
             ),
             SizedBox(height: 32.h),
@@ -715,6 +739,7 @@ class _ScanStep extends StatelessWidget {
     required this.cameraCtrl,
     required this.cameraReady,
     required this.cameraError,
+    required this.scanErrorMessage,
     required this.faceDetected,
     required this.pulseAnim,
     required this.shimmerAnim,
@@ -726,6 +751,7 @@ class _ScanStep extends StatelessWidget {
   final CameraController? cameraCtrl;
   final bool cameraReady;
   final bool cameraError;
+  final String? scanErrorMessage;
   final bool faceDetected;
   final Animation<double> pulseAnim;
   final Animation<double> shimmerAnim;
@@ -735,6 +761,13 @@ class _ScanStep extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final hasError =
+        cameraError ||
+        (scanErrorMessage != null && scanErrorMessage!.trim().isNotEmpty);
+    final statusColor = hasError
+        ? Colors.redAccent
+        : (faceDetected ? _kAccent : _kTextPrimary);
+
     return Stack(
       children: [
         // Full dark background
@@ -749,11 +782,49 @@ class _ScanStep extends StatelessWidget {
                 instructionText,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: faceDetected ? _kAccent : Colors.white70,
+                  color: statusColor,
                   fontSize: 15.sp,
                   fontWeight: FontWeight.w600,
                 ),
               ),
+              if (hasError) ...[
+                SizedBox(height: 8.h),
+                Container(
+                  margin: EdgeInsets.symmetric(horizontal: 24.w),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 12.w,
+                    vertical: 8.h,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.redAccent.withOpacity(0.16),
+                    borderRadius: BorderRadius.circular(12.r),
+                    border: Border.all(
+                      color: Colors.redAccent.withOpacity(0.6),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.error_outline_rounded,
+                        color: Colors.redAccent,
+                        size: 18.sp,
+                      ),
+                      SizedBox(width: 8.w),
+                      Expanded(
+                        child: Text(
+                          scanErrorMessage ??
+                              'Kamera bilan bog\'liq xatolik yuz berdi',
+                          style: TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 12.sp,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               SizedBox(height: 8.h),
 
               // ── Circle camera viewport ──
@@ -771,6 +842,7 @@ class _ScanStep extends StatelessWidget {
                       cameraCtrl: cameraCtrl,
                       cameraReady: cameraReady,
                       cameraError: cameraError,
+                      hasError: hasError,
                       faceDetected: faceDetected,
                       shimmerAnim: shimmerAnim,
                       progress: scanProgress,
@@ -789,7 +861,7 @@ class _ScanStep extends StatelessWidget {
                 onPressed: onCancel,
                 child: Text(
                   'Bekor qilish',
-                  style: TextStyle(color: Colors.white38, fontSize: 14.sp),
+                  style: TextStyle(color: _kTextSecondary, fontSize: 14.sp),
                 ),
               ),
               SizedBox(height: 16.h),
@@ -806,6 +878,7 @@ class _OvalCameraViewport extends StatelessWidget {
     required this.cameraCtrl,
     required this.cameraReady,
     required this.cameraError,
+    required this.hasError,
     required this.faceDetected,
     required this.shimmerAnim,
     required this.progress,
@@ -814,6 +887,7 @@ class _OvalCameraViewport extends StatelessWidget {
   final CameraController? cameraCtrl;
   final bool cameraReady;
   final bool cameraError;
+  final bool hasError;
   final bool faceDetected;
   final Animation<double> shimmerAnim;
   final double progress;
@@ -822,7 +896,10 @@ class _OvalCameraViewport extends StatelessWidget {
   Widget build(BuildContext context) {
     final width = 260.w;
     final height = 340.w;
-    final borderColor = faceDetected ? _kAccent : Colors.white30;
+    final borderColor = hasError
+        ? Colors.redAccent
+        : (faceDetected ? _kAccent : Colors.white30);
+    final progressColor = hasError ? Colors.redAccent : _kAccent;
     final strokeW = faceDetected ? 3.5 : 2.0;
 
     return Stack(
@@ -876,12 +953,16 @@ class _OvalCameraViewport extends StatelessWidget {
                   size: Size(width, height),
                   painter: _ProgressPainter(
                     progress: progress,
-                    color: _kAccent,
+                    color: progressColor,
                   ),
                 ),
 
                 if (faceDetected)
-                  _ScannerGlow(width: width, height: height, color: _kAccent),
+                  _ScannerGlow(
+                    width: width,
+                    height: height,
+                    color: progressColor,
+                  ),
               ],
             ),
           ),
@@ -894,7 +975,7 @@ class _OvalCameraViewport extends StatelessWidget {
 
   Widget _loadingWidget() {
     return Container(
-      color: const Color(0xFF0D1020),
+      color: Colors.white,
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -910,7 +991,7 @@ class _OvalCameraViewport extends StatelessWidget {
             SizedBox(height: 12.h),
             Text(
               'Kamera yuklanmoqda...',
-              style: TextStyle(color: Colors.white54, fontSize: 12.sp),
+              style: TextStyle(color: _kTextSecondary, fontSize: 12.sp),
             ),
           ],
         ),
@@ -920,7 +1001,7 @@ class _OvalCameraViewport extends StatelessWidget {
 
   Widget _cameraErrorWidget() {
     return Container(
-      color: const Color(0xFF0D1020),
+      color: Colors.white,
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -933,7 +1014,11 @@ class _OvalCameraViewport extends StatelessWidget {
             SizedBox(height: 8.h),
             Text(
               'Kamera xatosi',
-              style: TextStyle(color: Colors.white54, fontSize: 12.sp),
+              style: TextStyle(
+                color: Colors.redAccent,
+                fontSize: 13.sp,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ],
         ),
@@ -1013,7 +1098,7 @@ class _ResultStep extends StatelessWidget {
           Text(
             success ? 'Muvaffaqiyatli!' : 'Tasdiqlanmadi',
             style: TextStyle(
-              color: Colors.white,
+              color: _kTextPrimary,
               fontSize: 24.sp,
               fontWeight: FontWeight.w800,
             ),
@@ -1024,7 +1109,7 @@ class _ResultStep extends StatelessWidget {
                 ? 'Shaxsingiz muvaffaqiyatli tasdiqlandi'
                 : 'Yuz aniqlanmadi. Qayta urinib ko\'ring',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white54, fontSize: 14.sp),
+            style: TextStyle(color: _kTextSecondary, fontSize: 14.sp),
           ),
           SizedBox(height: 32.h),
 
@@ -1044,7 +1129,7 @@ class _ResultStep extends StatelessWidget {
               onPressed: onRetry,
               child: Text(
                 'Boshidan boshlash',
-                style: TextStyle(color: Colors.white38, fontSize: 13.sp),
+                style: TextStyle(color: _kTextSecondary, fontSize: 13.sp),
               ),
             ),
           ],
@@ -1080,28 +1165,31 @@ class _MyIdTextField extends StatelessWidget {
     return TextFormField(
       controller: controller,
       style: TextStyle(
-        color: Colors.white,
+        color: _kTextPrimary,
         fontSize: 16.sp,
         fontWeight: FontWeight.w600,
         letterSpacing: 1.4,
       ),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: TextStyle(color: Colors.white24, fontSize: 15.sp),
+        hintStyle: TextStyle(
+          color: _kTextSecondary.withOpacity(0.5),
+          fontSize: 15.sp,
+        ),
         prefixIcon: Padding(
           padding: EdgeInsets.symmetric(horizontal: 14.w),
           child: Icon(icon, color: _kAccent, size: 22.sp),
         ),
         filled: true,
-        fillColor: const Color(0xFF1A1E2E),
+        fillColor: _kCard,
         contentPadding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 18.h),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14.r),
-          borderSide: BorderSide(color: Colors.white12, width: 1.2),
+          borderSide: BorderSide(color: const Color(0xFFE2E8F0), width: 1.2),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14.r),
-          borderSide: BorderSide(color: Colors.white12, width: 1.2),
+          borderSide: BorderSide(color: const Color(0xFFE2E8F0), width: 1.2),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14.r),
@@ -1143,14 +1231,17 @@ class _MyIdDateField extends StatelessWidget {
       readOnly: true,
       onTap: onTap,
       style: TextStyle(
-        color: Colors.white,
+        color: _kTextPrimary,
         fontSize: 16.sp,
         fontWeight: FontWeight.w600,
         letterSpacing: 1.2,
       ),
       decoration: InputDecoration(
         hintText: 'KK.OO.YYYY',
-        hintStyle: TextStyle(color: Colors.white24, fontSize: 15.sp),
+        hintStyle: TextStyle(
+          color: _kTextSecondary.withOpacity(0.5),
+          fontSize: 15.sp,
+        ),
         prefixIcon: Padding(
           padding: EdgeInsets.symmetric(horizontal: 14.w),
           child: Icon(
@@ -1163,20 +1254,20 @@ class _MyIdDateField extends StatelessWidget {
           padding: EdgeInsets.only(right: 14.w),
           child: Icon(
             Icons.expand_more_rounded,
-            color: Colors.white38,
+            color: _kTextSecondary,
             size: 22.sp,
           ),
         ),
         filled: true,
-        fillColor: const Color(0xFF1A1E2E),
+        fillColor: _kCard,
         contentPadding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 18.h),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14.r),
-          borderSide: BorderSide(color: Colors.white12, width: 1.2),
+          borderSide: BorderSide(color: const Color(0xFFE2E8F0), width: 1.2),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14.r),
-          borderSide: BorderSide(color: Colors.white12, width: 1.2),
+          borderSide: BorderSide(color: const Color(0xFFE2E8F0), width: 1.2),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14.r),
@@ -1207,7 +1298,7 @@ class _SectionLabel extends StatelessWidget {
     return Text(
       text,
       style: TextStyle(
-        color: Colors.white70,
+        color: _kTextSecondary,
         fontSize: 13.sp,
         fontWeight: FontWeight.w600,
         letterSpacing: 0.4,
@@ -1236,7 +1327,7 @@ class _InfoCard extends StatelessWidget {
             child: Text(
               'Ma\'lumotlaringiz xavfsiz saqlanadi va faqat shaxsni tasdiqlash uchun ishlatiladi.',
               style: TextStyle(
-                color: Colors.white60,
+                color: _kTextSecondary,
                 fontSize: 12.sp,
                 height: 1.5,
               ),
@@ -1260,12 +1351,16 @@ class _ResultCard extends StatelessWidget {
       width: double.infinity,
       padding: EdgeInsets.all(20.r),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1E2E),
+        color: _kCard,
         borderRadius: BorderRadius.circular(20.r),
-        border: Border.all(
-          color: const Color(0xFF00C896).withOpacity(0.3),
-          width: 1.2,
-        ),
+        border: Border.all(color: const Color(0xFFE2E8F0), width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         children: [
@@ -1274,18 +1369,18 @@ class _ResultCard extends StatelessWidget {
             value: passport,
             icon: Icons.badge,
           ),
-          Divider(color: Colors.white12, height: 24.h),
+          Divider(color: const Color(0xFFE8EDF5), height: 24.h),
           _ResultRow(
             label: 'Туғилган сана',
             value: dob,
             icon: Icons.cake_outlined,
           ),
-          Divider(color: Colors.white12, height: 24.h),
+          Divider(color: const Color(0xFFE8EDF5), height: 24.h),
           _ResultRow(
             label: 'Holat',
             value: 'Tasdiqlandi ✓',
             icon: Icons.verified_rounded,
-            valueColor: const Color(0xFF00C896),
+            valueColor: const Color(0xFF00A878),
           ),
         ],
       ),
@@ -1310,7 +1405,7 @@ class _ResultRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Icon(icon, color: Colors.white38, size: 18.sp),
+        Icon(icon, color: _kTextSecondary, size: 18.sp),
         SizedBox(width: 10.w),
         Expanded(
           child: Column(
@@ -1318,13 +1413,13 @@ class _ResultRow extends StatelessWidget {
             children: [
               Text(
                 label,
-                style: TextStyle(color: Colors.white38, fontSize: 11.sp),
+                style: TextStyle(color: _kTextSecondary, fontSize: 11.sp),
               ),
               SizedBox(height: 2.h),
               Text(
                 value,
                 style: TextStyle(
-                  color: valueColor ?? Colors.white,
+                  color: valueColor ?? _kTextPrimary,
                   fontSize: 14.sp,
                   fontWeight: FontWeight.w700,
                   letterSpacing: 0.8,
@@ -1356,11 +1451,11 @@ class _ScanTips extends StatelessWidget {
               padding: EdgeInsets.symmetric(horizontal: 8.w),
               child: Column(
                 children: [
-                  Icon(t.$1, color: Colors.white38, size: 18.sp),
+                  Icon(t.$1, color: _kTextSecondary, size: 18.sp),
                   SizedBox(height: 4.h),
                   Text(
                     t.$2,
-                    style: TextStyle(color: Colors.white38, fontSize: 9.sp),
+                    style: TextStyle(color: _kTextSecondary, fontSize: 9.sp),
                     textAlign: TextAlign.center,
                   ),
                 ],
@@ -1486,8 +1581,7 @@ class _ProgressPainter extends CustomPainter {
 
     final rect = (Offset.zero & size).deflate(1.5);
     final paint = Paint()
-      ..color =
-          const Color(0xFF00C896) // Success green for progress
+      ..color = color
       ..strokeWidth = 4.0
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
@@ -1501,7 +1595,8 @@ class _ProgressPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_ProgressPainter old) => old.progress != progress;
+  bool shouldRepaint(_ProgressPainter old) =>
+      old.progress != progress || old.color != color;
 }
 
 class _OvalClipper extends CustomClipper<Path> {
@@ -1760,12 +1855,12 @@ class _MetricRow extends StatelessWidget {
       children: [
         Text(
           label,
-          style: TextStyle(color: Colors.white38, fontSize: 12.sp),
+          style: TextStyle(color: _kTextSecondary, fontSize: 12.sp),
         ),
         Text(
           value,
           style: TextStyle(
-            color: Colors.white,
+            color: _kTextPrimary,
             fontSize: 12.sp,
             fontWeight: FontWeight.bold,
           ),
@@ -1779,10 +1874,13 @@ class _MetricRow extends StatelessWidget {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const _kBg = Color(0xFF0D1020);
-const _kAccent = Color(0xFF4C6EF5);
+const _kBg = Color(0xFFF4F7FF);
+const _kCard = Colors.white;
+const _kAccent = Color(0xFF3B6CF8);
+const _kTextPrimary = Color(0xFF1A2340);
+const _kTextSecondary = Color(0xFF64748B);
 const _kGradient = LinearGradient(
-  colors: [Color(0xFF4C6EF5), Color(0xFF7B3FE4)],
+  colors: [Color(0xFF3B6CF8), Color(0xFF5B8DF8)],
   begin: Alignment.centerLeft,
   end: Alignment.centerRight,
 );
