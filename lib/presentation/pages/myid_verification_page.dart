@@ -62,7 +62,6 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   late final AnimationController _shimmerCtrl;
   late final Animation<double> _shimmer;
 
-  // --- result ---
   bool _verificationSuccess = false;
 
   @override
