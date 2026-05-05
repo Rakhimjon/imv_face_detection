@@ -43,122 +43,89 @@ class FaceValidator {
     final faceWidth = face.width;
     final faceHeight = face.height;
 
-    if (faceWidth < _minFaceSize || faceHeight < _minFaceSize) {
-      errors.add(
-        'Face too small (${faceWidth.toInt()}x${faceHeight.toInt()}px) - Move closer',
-      );
+    // 1. Size Validation (Relative to frame if possible, but keeping pixels for now with better thresholds)
+    if (faceWidth < 60 || faceHeight < 60) {
+      errors.add('Yuz juda uzoqda - yaqinroq keling');
       confidenceScore -= 30;
-    } else if (faceWidth < _recommendedFaceSize) {
-      warnings.add('Face somewhat small - Recommended to move closer');
+    } else if (faceWidth < 100) {
+      warnings.add('Yuz biroz uzoqda');
       confidenceScore -= 10;
     }
 
-    if (faceWidth > _maxFaceSize || faceHeight > _maxFaceSize) {
-      errors.add('Face too large - Move back from camera');
+    if (faceWidth > 450 || faceHeight > 450) {
+      errors.add('Yuz juda yaqin - uzoqroq turing');
       confidenceScore -= 20;
     }
 
+    // 2. Aspect Ratio (Typical human face is ~1.3-1.5 height/width, but we use width/height)
     final aspectRatio = faceWidth / faceHeight;
-    if (aspectRatio < 0.6 || aspectRatio > 1.4) {
-      warnings.add(
-        'Unusual face aspect ratio: ${aspectRatio.toStringAsFixed(2)}',
-      );
+    if (aspectRatio < 0.5 || aspectRatio > 1.5) {
+      warnings.add('Yuz formasi noodatiy');
       confidenceScore -= 15;
     }
 
+    // 3. Orientation Validation
     final yaw = face.yaw;
     final pitch = face.pitch;
     final roll = face.roll;
 
-    if (yaw.abs() > _maxValidYaw) {
-      errors.add('Bosh juda ko\'p burilgan (Yaw: ${yaw.toStringAsFixed(1)}°)');
+    if (yaw.abs() > 40) {
+      errors.add('Bosh juda ko\'p burilgan');
       confidenceScore -= 25;
-    } else if (yaw.abs() > _warnYaw) {
-      warnings.add('Head slightly turned (Yaw: ${yaw.toStringAsFixed(1)}°)');
+    } else if (yaw.abs() > 25) {
+      warnings.add('Bosh biroz burilgan');
       confidenceScore -= 10;
     }
 
-    if (pitch.abs() > _maxValidPitch) {
-      errors.add(
-        'Head tilted too much up/down (Pitch: ${pitch.toStringAsFixed(1)}°)',
-      );
+    if (pitch.abs() > 35) {
+      errors.add('Bosh juda ko\'p egilgan');
       confidenceScore -= 20;
     }
 
-    if (roll.abs() > _warnRoll) {
-      warnings.add('Head rolled (Roll: ${roll.toStringAsFixed(1)}°)');
+    if (roll.abs() > 25) {
+      warnings.add('Bosh qiyshaygan');
       confidenceScore -= 10;
     }
+
+    // 4. Eye Data Validation
     final leftEye = face.leftEyeOpenProbability;
     final rightEye = face.rightEyeOpenProbability;
 
     if (leftEye == null || rightEye == null) {
-      // Downgrade to warning — poor lighting should not hard-block detection.
-      warnings.add('Eye data unavailable — improve lighting');
+      warnings.add('Ko\'zlarni aniqlab bo\'lmadi');
       confidenceScore -= 15;
     } else {
-      // Check if eyes are closed (not blinking intentionally)
-      if (leftEye < _closedEyeThreshold && rightEye < _closedEyeThreshold) {
-        warnings.add('Both eyes appear closed');
-        confidenceScore -= 15;
-      }
-
-      // Check for asymmetric eye opening (could indicate spoofing)
-      final eyeDifference = (leftEye - rightEye).abs();
-      if (eyeDifference > 0.5) {
-        warnings.add('Asymmetric eye opening detected');
+      if (leftEye < 0.1 && rightEye < 0.1) {
+        warnings.add('Ko\'zlar yumuq');
         confidenceScore -= 10;
       }
     }
 
-    // 5. Smile/Expression Check
-    final smile = face.smilingProbability;
-    if (smile != null && smile > 0.9) {
-      warnings.add('Excessive smiling detected - Maintain neutral expression');
-      confidenceScore -= 5;
+    // 5. Anti-spoofing: Pattern Check
+    if (isSuspiciousPattern(face)) {
+      warnings.add('Shubhali holat aniqlandi');
+      confidenceScore -= 20;
     }
 
-    // 6. Tracking ID Validation (for anti-spoofing)
-    if (face.trackingId == null) {
-      warnings.add('Face tracking ID not available');
-    }
-
-    // 7. Landmark Validation - Should have key facial landmarks
+    // 6. Landmark Validation
     if (face.landmarks.isEmpty) {
-      errors.add('No facial landmarks detected - Face may be obscured');
+      errors.add('Yuz chizgilari aniqlanmadi');
       confidenceScore -= 30;
     } else {
-      // Check for essential landmarks
       final hasLeftEye = face.hasLandmark(FaceLandmarkType.leftEye);
       final hasRightEye = face.hasLandmark(FaceLandmarkType.rightEye);
       final hasNose = face.hasLandmark(FaceLandmarkType.noseBase);
       final hasMouth = face.hasLandmark(FaceLandmarkType.bottomMouth);
 
       if (!hasLeftEye || !hasRightEye) {
-        // Warn rather than error — face may still be usable.
-        warnings.add('Eyes not fully detected — adjust lighting');
+        warnings.add('Ko\'zlar to\'liq ko\'rinmayapti');
         confidenceScore -= 15;
       }
-
-      if (!hasNose) {
-        warnings.add('Nose landmark not detected');
-        confidenceScore -= 10;
-      }
-
-      if (!hasMouth) {
-        warnings.add('Mouth landmark not detected');
-        confidenceScore -= 10;
-      }
+      if (!hasNose) confidenceScore -= 5;
     }
 
-    // 8. Position Validation - Face should be reasonably centered
-    // Future enhancement: Add position validation based on camera resolution
-
-    // Final confidence score adjustment
     confidenceScore = confidenceScore.clamp(0.0, 100.0);
-
-    // Determine if valid based on confidence and errors
-    final isValid = errors.isEmpty && confidenceScore >= 45.0;
+    final isValid = errors.isEmpty && confidenceScore >= 40.0;
 
     return FaceValidationResult(
       isValid: isValid,
@@ -173,30 +140,27 @@ class FaceValidator {
     required FaceEntity currentFace,
     required FaceEntity? previousFace,
     required LivenessAction expectedAction,
+    Map<String, dynamic>? state, // For complex state like blink
   }) {
-    if (previousFace == null) return false;
+    if (previousFace == null && expectedAction != LivenessAction.neutral) return false;
 
     final currentYaw = currentFace.yaw;
-    final previousYaw = previousFace.yaw;
     final currentPitch = currentFace.pitch;
-    final previousPitch = previousFace.pitch;
-
+    
     switch (expectedAction) {
       case LivenessAction.turnLeft:
-        return currentYaw < previousYaw && currentYaw < -15;
+        return currentYaw < -18;
       case LivenessAction.turnRight:
-        return currentYaw > previousYaw && currentYaw > 15;
+        return currentYaw > 18;
       case LivenessAction.lookUp:
-        return currentPitch > previousPitch && currentPitch > 15;
+        return currentPitch > 18;
       case LivenessAction.lookDown:
-        return currentPitch < previousPitch && currentPitch < -15;
+        return currentPitch < -18;
       case LivenessAction.blink:
-        final leftEye = currentFace.leftEyeOpenProbability ?? 1.0;
-        final rightEye = currentFace.rightEyeOpenProbability ?? 1.0;
-        return leftEye < 0.35 && rightEye < 0.35;
+        // Blink logic is handled by the page for better state management across frames
+        return false; 
       case LivenessAction.smile:
-        final smile = currentFace.smilingProbability ?? 0.0;
-        return smile > 0.7;
+        return (currentFace.smilingProbability ?? 0.0) > 0.75;
       case LivenessAction.neutral:
         return currentYaw.abs() < 10 && currentPitch.abs() < 10;
     }
@@ -204,35 +168,48 @@ class FaceValidator {
 
   /// Checks if face distance is optimal
   static String getFaceDistanceQuality(double faceWidth) {
-    if (faceWidth > 280) return 'TOO_CLOSE';
-    if (faceWidth < 100) return 'TOO_FAR';
-    if (faceWidth >= 180 && faceWidth <= 240) return 'OPTIMAL';
+    if (faceWidth > 380) return 'TOO_CLOSE';
+    if (faceWidth < 80) return 'TOO_FAR';
+    if (faceWidth >= 150 && faceWidth <= 300) return 'OPTIMAL';
     return 'ACCEPTABLE';
   }
 
   /// Anti-spoofing check - detects unusual patterns
   static bool isSuspiciousPattern(FaceEntity face) {
-    // Check for perfectly still face (could be a photo)
     final leftEye = face.leftEyeOpenProbability ?? 0.5;
     final rightEye = face.rightEyeOpenProbability ?? 0.5;
 
-    // Perfectly symmetric values might indicate spoofing
-    if ((leftEye - rightEye).abs() < 0.01 && leftEye == 1.0) {
-      return true; // Suspicious: perfect symmetry
-    }
+    // Photos often have perfect 1.0/1.0 eye probabilities or identical values
+    if (leftEye > 0.999 && rightEye > 0.999) return false; // Normal
+    if ((leftEye - rightEye).abs() < 0.0001 && leftEye < 0.9) return true;
 
-    // Check for unnatural stillness
-    final yaw = face.yaw;
-    final pitch = face.pitch;
-    final roll = face.roll;
+    return false;
+  }
 
-    if (yaw == 0.0 && pitch == 0.0 && roll == 0.0) {
-      return true; // Suspicious: perfect alignment
-    }
+  /// Checks for consistency across frames to detect deepfake "glitches"
+  static bool isConsistencySuspicious(FaceEntity current, FaceEntity? previous) {
+    if (previous == null) return false;
+
+    // Detect teleportation (face moving too fast between frames)
+    final currentCenter = current.boundingBox.center;
+    final previousCenter = previous.boundingBox.center;
+    final distance = (currentCenter - previousCenter).distance;
+
+    // High threshold: 60% of face width. Normal movement is slower.
+    if (distance > current.boundingBox.width * 0.6) return true;
+
+    // Detect rapid size changes
+    final currentSize = current.boundingBox.width;
+    final previousSize = previous.boundingBox.width;
+    final sizeChange = (currentSize - previousSize).abs() / previousSize;
+
+    if (sizeChange > 0.45) return true;
 
     return false;
   }
 }
+
+
 
 enum LivenessAction {
   turnLeft,

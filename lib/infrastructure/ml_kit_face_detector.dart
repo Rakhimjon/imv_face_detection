@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -21,7 +22,7 @@ class MLKitFaceDetector implements IFaceDetector {
               enableClassification: true,
               enableTracking: true,
               enableContours: true,
-              minFaceSize: 0.08,
+              minFaceSize: 0.10,
               performanceMode: ml_kit.FaceDetectorMode.accurate,
             ),
       );
@@ -59,7 +60,6 @@ class MLKitFaceDetector implements IFaceDetector {
       if (Platform.isAndroid) {
         final bytes = _androidImageToNv21Bytes(image);
         if (bytes == null) {
-      
           return null;
         }
 
@@ -108,34 +108,39 @@ class MLKitFaceDetector implements IFaceDetector {
     final width = image.width;
     final height = image.height;
 
-    // 🔧 FIXED: yPlane = (was yPimage.planes[0])
     final yPlane = image.planes[0];
     final uPlane = image.planes[1];
     final vPlane = image.planes[2];
 
     final nv21 = Uint8List(width * height + (width * height ~/ 2));
 
-    // Copy Y plane
+    // Copy the Y plane row by row so row stride padding does not corrupt the frame.
     final yBytes = yPlane.bytes;
-    for (int i = 0; i < width * height; i++) {
-      nv21[i] = yBytes[i];
+    final yRowStride = yPlane.bytesPerRow;
+    var outputIndex = 0;
+    for (int row = 0; row < height; row++) {
+      final rowStart = row * yRowStride;
+      for (int col = 0; col < width; col++) {
+        nv21[outputIndex++] = yBytes[rowStart + col];
+      }
     }
 
-    // Interleave U and V
-    int uvIndex = width * height;
+    // Interleave VU for NV21, respecting row and pixel stride.
+    var uvIndex = width * height;
     final uBytes = uPlane.bytes;
     final vBytes = vPlane.bytes;
 
-    final uvWidth = width ~/ 2;
+    final uvRowStride = uPlane.bytesPerRow;
+    final uvPixelStride = uPlane.bytesPerPixel ?? 1;
     final uvHeight = height ~/ 2;
+    final uvWidth = width ~/ 2;
 
     for (int row = 0; row < uvHeight; row++) {
       for (int col = 0; col < uvWidth; col++) {
-        final uvPixelStride = uPlane.bytesPerPixel ?? 1;
-        final uvIndexSrc = row * uPlane.bytesPerRow + col * uvPixelStride;
-        if (uvIndexSrc < uBytes.length && uvIndexSrc < vBytes.length) {
-          nv21[uvIndex++] = vBytes[uvIndexSrc];
-          nv21[uvIndex++] = uBytes[uvIndexSrc];
+        final uvOffset = row * uvRowStride + col * uvPixelStride;
+        if (uvOffset < uBytes.length && uvOffset < vBytes.length) {
+          nv21[uvIndex++] = vBytes[uvOffset];
+          nv21[uvIndex++] = uBytes[uvOffset];
         }
       }
     }
@@ -194,7 +199,7 @@ class MLKitFaceDetector implements IFaceDetector {
   bool _isHighQualityFace(ml_kit.Face face) {
     final width = face.boundingBox.width;
     final height = face.boundingBox.height;
-    if (width < 40 || height < 40) return false;
+    if (width < 50 || height < 50) return false;
     final yaw = face.headEulerAngleY?.abs() ?? 0;
     final pitch = face.headEulerAngleX?.abs() ?? 0;
     if (yaw > 70 || pitch > 60) return false;

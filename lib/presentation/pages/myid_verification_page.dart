@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:camera/camera.dart';
 import 'package:face_imv/domain/face_entity.dart';
 import 'package:face_imv/domain/i_face_detector.dart';
@@ -26,14 +27,32 @@ class MyIdVerificationPage extends StatefulWidget {
 
 enum _Step { input, scan, analyzing, result }
 
-enum _LivenessStep { straight, blink, left, right, done }
+enum _BlinkPhase { waitingForOpen, waitingForClose, waitingForReopen }
+
+class _LivenessChallenge {
+  final LivenessAction action;
+  final String instruction;
+  final IconData icon;
+
+  const _LivenessChallenge({
+    required this.action,
+    required this.instruction,
+    required this.icon,
+  });
+}
 
 // ─── Page state ──────────────────────────────────────────────────────────────
 
 class _MyIdVerificationPageState extends State<MyIdVerificationPage>
     with TickerProviderStateMixin {
   _Step _step = _Step.input;
-  _LivenessStep _livenessStep = _LivenessStep.straight;
+  List<_LivenessChallenge> _challenges = [];
+  int _challengeIndex = -1; // -1 means initial (straighten face)
+  bool _livenessComplete = false;
+
+  _BlinkPhase _blinkPhase = _BlinkPhase.waitingForOpen;
+  int _blinkOpenFrames = 0;
+  int _blinkClosedFrames = 0;
 
   // --- passport form ---
   final _passportController = TextEditingController(text: 'AD2793792');
@@ -54,7 +73,13 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   Timer? _analysisTimer;
   int _lastFrameTime = 0;
   FaceEntity? _previousFace;
+  int _stableFaceFrames = 0;
+  int? _lastTrackingId;
   late final IFaceDetector _faceDetector;
+  int _faceLostTime = 0;
+  DateTime? _lastConsistencyWarningTime;
+  String? _currentLivenessWarning;
+
 
   // --- animations ---
   late final AnimationController _pulseCtrl;
@@ -165,6 +190,9 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
         _cameraReady = false;
         _faceDetected = false;
         _detectedFaces = const <FaceEntity>[];
+        _stableFaceFrames = 0;
+        _lastTrackingId = null;
+        _resetBlinkState();
       });
     }
   }
@@ -174,14 +202,12 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
       return;
     }
 
-    debugPrint(
-      '🎥 Starting face detection stream for liveness verification...',
-    );
+    debugPrint('🎥 Starting face detection stream for liveness verification...');
 
     _cameraController!.startImageStream((image) async {
       if (_isProcessing || _step != _Step.scan) return;
       final now = DateTime.now().millisecondsSinceEpoch;
-      if (now - _lastFrameTime < 80) return;
+      if (now - _lastFrameTime < 66) return;
 
       _lastFrameTime = now;
       _isProcessing = true;
@@ -195,9 +221,7 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
         result.fold(
           (error) {
             debugPrint('❌ Face detection error: $error');
-            if (_scanErrorMessage != error ||
-                _faceDetected ||
-                _detectedFaces.isNotEmpty) {
+            if (_scanErrorMessage != error) {
               setState(() {
                 _scanErrorMessage = error;
                 _faceDetected = false;
@@ -206,182 +230,151 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
             }
           },
           (faces) {
-            if (_scanErrorMessage != null) {
-              setState(() {
-                _scanErrorMessage = null;
-              });
+            if (faces.length > 1) {
+              if (_scanErrorMessage != 'Kadrda faqat bitta yuz bo\'lishi kerak') {
+                setState(() {
+                  _scanErrorMessage = 'Kadrda faqat bitta yuz bo\'lishi kerak';
+                  _faceDetected = true;
+                  _detectedFaces = List<FaceEntity>.unmodifiable(faces);
+                });
+                context.showErrorToast('Faqat bir kishi bo\'lishi kerak');
+              }
+              _stableFaceFrames = 0;
+              _previousFace = null;
+              return;
             }
+
+            if (_scanErrorMessage != null) {
+              setState(() => _scanErrorMessage = null);
+            }
+            
             final detected = faces.isNotEmpty;
-            final detectionChanged = detected != _faceDetected;
-            final facesChanged = detected
-                ? _detectedFaces != faces
-                : _detectedFaces.isNotEmpty;
-            if (detectionChanged || facesChanged) {
+            if (detected != _faceDetected) {
               setState(() {
                 _faceDetected = detected;
                 _detectedFaces = List<FaceEntity>.unmodifiable(faces);
               });
-              if (detectionChanged) {
-                debugPrint('👤 Face detected: $detected');
-              }
             }
 
             if (detected) {
+              _faceLostTime = 0;
               final face = faces.first;
+              final trackingId = face.trackingId;
               final yaw = face.yaw;
               final pitch = face.pitch;
               final leftEye = face.leftEyeOpenProbability ?? 1.0;
               final rightEye = face.rightEyeOpenProbability ?? 1.0;
               final faceWidth = face.width;
               final validation = FaceValidator.validateHumanFace(face);
+              final distanceQuality = FaceValidator.getFaceDistanceQuality(faceWidth);
+              final eyeAverage = (leftEye + rightEye) / 2.0;
 
-              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              debugPrint(
-                '🔴 LIVENESS CHECK - Step: ${_livenessStep.name.toUpperCase()}',
-              );
-              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              debugPrint('📊 Current Metrics:');
-              debugPrint('  ↔️  Head Yaw (Y):    ${yaw.toStringAsFixed(2)}°');
-              debugPrint('  ↕️  Head Pitch (X):  ${pitch.toStringAsFixed(2)}°');
-              debugPrint(
-                '  👁️  Left Eye Open:  ${(leftEye * 100).toStringAsFixed(1)}%',
-              );
-              debugPrint(
-                '  👁️  Right Eye Open: ${(rightEye * 100).toStringAsFixed(1)}%',
-              );
-              debugPrint(
-                '  📏 Face Width:      ${faceWidth.toStringAsFixed(0)}px',
-              );
-              debugPrint(
-                '  🧑 Face Valid:      ${validation.isValid ? "YES" : "NO"} (${(validation.confidenceScore * 100).toStringAsFixed(1)}%)',
-              );
-              debugPrint(
-                '  📈 Progress:        ${(_scanProgress * 100).toStringAsFixed(0)}%',
-              );
-              if (validation.warnings.isNotEmpty) {
-                debugPrint(
-                  '  ⚠️  Warnings: ${validation.warnings.join(" | ")}',
-                );
-              }
-              if (validation.errors.isNotEmpty) {
-                debugPrint('  ❌ Errors:   ${validation.errors.join(" | ")}');
-              }
-
-              if (!validation.isValid) {
-                debugPrint('\n⏳ WAITING - Face quality is not sufficient yet');
-                debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-                if (validation.errors.isNotEmpty) {
-                  if (mounted) {
-                    context.showErrorToast(validation.errors.first);
-                  }
+              // Anti-spoofing: Consistency Check
+              if (FaceValidator.isConsistencySuspicious(face, _previousFace)) {
+                final now = DateTime.now();
+                if (_lastConsistencyWarningTime == null || 
+                    now.difference(_lastConsistencyWarningTime!) > const Duration(seconds: 2)) {
+                  _lastConsistencyWarningTime = now;
+                  context.showErrorToast('Iltimos, harakatlanmang');
                 }
                 _previousFace = face;
                 return;
               }
 
-              if (_livenessStep == _LivenessStep.straight) {
-                debugPrint('\n🎯 STEP 1: Checking if facing STRAIGHT...');
-                debugPrint('   Required: Yaw between -10° and 10°');
-                debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
-                if (yaw > -10 && yaw < 10) {
-                  debugPrint('   ✅ PASSED - Moving to BLINK step');
+              final sameTrackedFace = _lastTrackingId == null || trackingId == null || trackingId == _lastTrackingId;
+              if (sameTrackedFace) {
+                _stableFaceFrames += 1;
+              } else {
+                _stableFaceFrames = 1;
+              }
+              _lastTrackingId = trackingId;
+
+              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              final currentLabel = _livenessComplete ? "DONE" : (_challengeIndex == -1 ? "STRAIGHT" : _challenges[_challengeIndex].action.name.toUpperCase());
+              debugPrint('🔴 LIVENESS CHECK - Step: $currentLabel');
+              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              debugPrint('📊 Current Metrics:');
+              debugPrint('  ↔️  Head Yaw:   ${yaw.toStringAsFixed(2)}°');
+              debugPrint('  ↕️  Head Pitch: ${pitch.toStringAsFixed(2)}°');
+              debugPrint('  👁️  Eye Avg:    ${(eyeAverage * 100).toStringAsFixed(1)}%');
+              debugPrint('  📏 Face Width: ${faceWidth.toStringAsFixed(0)}px ($distanceQuality)');
+              debugPrint('  📈 Progress:   ${(_scanProgress * 100).toStringAsFixed(0)}%');
+
+              if (!validation.isValid) {
+                if (validation.errors.isNotEmpty && mounted) {
+                  context.showErrorToast(validation.errors.first);
+                }
+                _previousFace = face;
+                _stableFaceFrames = 0;
+                return;
+              }
+
+              if (_stableFaceFrames < 2) {
+                _previousFace = face;
+                return;
+              }
+
+              if (distanceQuality == 'TOO_FAR' || distanceQuality == 'TOO_CLOSE') {
+                _previousFace = face;
+                return;
+              }
+
+              // ── Liveness Logic ──
+              if (_livenessComplete) {
+                if (_step == _Step.scan) _startDeepAnalysis();
+              } else if (_challengeIndex == -1) {
+                if (yaw.abs() < 10 && pitch.abs() < 10) {
+                  debugPrint('   ✅ STRAIGHT PASSED');
                   setState(() {
-                    _scanProgress = 0.25;
-                    _livenessStep = _LivenessStep.blink;
+                    _challengeIndex = 0;
+                    _scanProgress = 0.15;
                   });
-                } else {
-                  debugPrint('   ⏳ WAITING - Straighten your head');
+                  _resetBlinkState();
                 }
               } else {
-                if (_livenessStep == _LivenessStep.blink) {
-                  debugPrint('\n👁️  STEP 2: Checking for BLINK...');
-                  debugPrint('   Required: Both eyes < 35% open');
-                  debugPrint(
-                    '   Left Eye:  ${(leftEye * 100).toStringAsFixed(1)}%',
+                final challenge = _challenges[_challengeIndex];
+                bool passed = false;
+                
+                if (challenge.action == LivenessAction.blink) {
+                  passed = _updateBlinkState(eyeAverage, leftEye, rightEye);
+                } else {
+                  passed = FaceValidator.validateLivenessSequence(
+                    currentFace: face,
+                    previousFace: _previousFace,
+                    expectedAction: challenge.action,
                   );
-                  debugPrint(
-                    '   Right Eye: ${(rightEye * 100).toStringAsFixed(1)}%',
-                  );
-                  if (FaceValidator.validateLivenessSequence(
-                    currentFace: face,
-                    previousFace: _previousFace,
-                    expectedAction: LivenessAction.blink,
-                  )) {
-                    debugPrint('   ✅ BLINK DETECTED - Moving to LEFT turn');
-                    setState(() {
-                      _scanProgress = 0.50;
-                      _livenessStep = _LivenessStep.left;
-                    });
-                  } else {
-                    debugPrint('   ⏳ WAITING - Please blink');
-                  }
-                } else if (_livenessStep == _LivenessStep.left) {
-                  debugPrint('\n⬅️  STEP 3: Checking LEFT turn...');
-                  debugPrint('   Required: Yaw < -15°');
-                  debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
-                  if (FaceValidator.validateLivenessSequence(
-                    currentFace: face,
-                    previousFace: _previousFace,
-                    expectedAction: LivenessAction.turnLeft,
-                  )) {
-                    debugPrint(
-                      '   ✅ LEFT TURN VERIFIED - Moving to RIGHT turn',
-                    );
-                    setState(() {
-                      _scanProgress = 0.75;
-                      _livenessStep = _LivenessStep.right;
-                    });
-                  } else {
-                    debugPrint('   ⏳ WAITING - Turn head left');
-                  }
-                } else if (_livenessStep == _LivenessStep.right) {
-                  debugPrint('\n➡️  STEP 4: Checking RIGHT turn...');
-                  debugPrint('   Required: Yaw > 15°');
-                  debugPrint('   Current:  ${yaw.toStringAsFixed(2)}°');
-                  if (FaceValidator.validateLivenessSequence(
-                    currentFace: face,
-                    previousFace: _previousFace,
-                    expectedAction: LivenessAction.turnRight,
-                  )) {
-                    debugPrint(
-                      '   ✅ RIGHT TURN VERIFIED - Liveness COMPLETE! 🎉',
-                    );
-                    setState(() {
+                }
+
+                if (passed) {
+                  debugPrint('   ✅ CHALLENGE ${challenge.action.name} PASSED');
+                  setState(() {
+                    _challengeIndex++;
+                    _scanProgress = 0.15 + (0.85 * (_challengeIndex / _challenges.length));
+                    if (_challengeIndex >= _challenges.length) {
+                      _livenessComplete = true;
                       _scanProgress = 1.0;
-                      _livenessStep = _LivenessStep.done;
-                    });
-                  } else {
-                    debugPrint('   ⏳ WAITING - Turn head right');
-                  }
-                } else if (_livenessStep == _LivenessStep.done) {
-                  if (_step == _Step.scan) {
-                    debugPrint('\n🎉 ALL LIVENESS STEPS COMPLETED!');
-                    debugPrint('🔬 Starting deep analysis...');
-                    _startDeepAnalysis();
-                  }
+                    }
+                  });
+                  _resetBlinkState();
                 }
               }
               _previousFace = face;
-              debugPrint('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
             } else {
               if (_faceDetected) {
-                debugPrint('⚠️  Face lost - Resetting liveness check');
+                final now = DateTime.now().millisecondsSinceEpoch;
+                if (_faceLostTime == 0) {
+                  _faceLostTime = now;
+                } else if (now - _faceLostTime > 3000) {
+                  debugPrint('⚠️ Face lost for too long - Resetting liveness');
+                  _resetLiveness();
+                  _faceLostTime = 0;
+                }
               }
-              _previousFace = null;
-              setState(() {
-                _scanProgress = 0;
-                _livenessStep = _LivenessStep.straight;
-              });
             }
           },
         );
       } catch (e) {
         debugPrint('❌ Error in face stream: $e');
-        if (_scanErrorMessage != 'Face stream xatosi: $e') {
-          setState(() {
-            _scanErrorMessage = 'Face stream xatosi: $e';
-          });
-        }
       } finally {
         _isProcessing = false;
       }
@@ -389,39 +382,44 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   }
 
   void _startDeepAnalysis() {
-    debugPrint('╔════════════════════════════════════════════╗');
-    debugPrint('║  🔬 DEEP ANALYSIS MODE ACTIVATED          ║');
-    debugPrint('╚════════════════════════════════════════════╝');
-    debugPrint('⏱️  Analysis duration: 2500ms');
-    debugPrint('🧠 Verifying biometric authenticity...');
-
-    setState(() {
-      _step = _Step.analyzing;
-    });
+    debugPrint('🔬 DEEP ANALYSIS MODE ACTIVATED');
+    setState(() => _step = _Step.analyzing);
     _analysisTimer = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) {
         debugPrint('✅ Deep analysis COMPLETE!');
-        debugPrint('🎉 Verification SUCCESS!\n');
         _completeVerification(success: true);
       }
     });
   }
 
-  // ─── Navigation between steps ─────────────────────────────────────────────
-
   void _goToScan() {
     if (!_formKey.currentState!.validate()) return;
+    _generateChallenges();
     setState(() {
       _step = _Step.scan;
-      _livenessStep = _LivenessStep.straight;
       _faceDetected = false;
       _detectedFaces = const <FaceEntity>[];
       _previousFace = null;
+      _stableFaceFrames = 0;
+      _lastTrackingId = null;
+      _resetBlinkState();
       _cameraReady = false;
       _cameraError = false;
       _scanErrorMessage = null;
     });
     _startCamera();
+  }
+
+  void _resetLiveness() {
+    _previousFace = null;
+    _stableFaceFrames = 0;
+    _lastTrackingId = null;
+    _resetBlinkState();
+    setState(() {
+      _challengeIndex = -1;
+      _livenessComplete = false;
+      _scanProgress = 0;
+    });
   }
 
   void _completeVerification({required bool success}) {
@@ -435,29 +433,119 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
   void _restart() {
     setState(() {
       _step = _Step.input;
-      _livenessStep = _LivenessStep.straight;
       _faceDetected = false;
       _detectedFaces = const <FaceEntity>[];
       _previousFace = null;
+      _stableFaceFrames = 0;
+      _lastTrackingId = null;
+      _resetBlinkState();
+      _challengeIndex = -1;
+      _livenessComplete = false;
       _scanProgress = 0;
       _scanErrorMessage = null;
     });
   }
 
+  void _resetBlinkState() {
+    _blinkPhase = _BlinkPhase.waitingForOpen;
+    _blinkOpenFrames = 0;
+    _blinkClosedFrames = 0;
+  }
+
+  bool _updateBlinkState(
+    double eyeAverage,
+    double leftEyeOpen,
+    double rightEyeOpen,
+  ) {
+    const openThreshold = 0.65;
+    const closeThreshold = 0.35;
+    const reopenThreshold = 0.60;
+    const minEyeGap = 0.08;
+
+    final eyesBalancedEnough = (leftEyeOpen - rightEyeOpen).abs() <= minEyeGap;
+    final eyesOpen = eyeAverage >= openThreshold && eyesBalancedEnough;
+    final eyesClosed = eyeAverage <= closeThreshold;
+    final eyesReopened = eyeAverage >= reopenThreshold && eyesBalancedEnough;
+
+    switch (_blinkPhase) {
+      case _BlinkPhase.waitingForOpen:
+        if (eyesOpen) {
+          _blinkOpenFrames += 1;
+          if (_blinkOpenFrames >= 2) {
+            _blinkPhase = _BlinkPhase.waitingForClose;
+            _blinkClosedFrames = 0;
+          }
+        } else {
+          _blinkOpenFrames = 0;
+        }
+        return false;
+      case _BlinkPhase.waitingForClose:
+        if (eyesClosed) {
+          _blinkClosedFrames += 1;
+          if (_blinkClosedFrames >= 1) {
+            _blinkPhase = _BlinkPhase.waitingForReopen;
+          }
+        } else if (!eyesOpen) {
+          _blinkOpenFrames = 0;
+        }
+        return false;
+      case _BlinkPhase.waitingForReopen:
+        if (eyesReopened) {
+          return true;
+        }
+        if (eyesClosed) {
+          _blinkClosedFrames += 1;
+        }
+        return false;
+    }
+  }
+
+  void _generateChallenges() {
+    final random = Random();
+    final isLeft = random.nextBool();
+
+    _challenges = [
+      const _LivenessChallenge(
+        action: LivenessAction.blink,
+        instruction: 'Ko\'zingizni yumib oching',
+        icon: Icons.remove_red_eye_rounded,
+      ),
+      _LivenessChallenge(
+        action: isLeft ? LivenessAction.turnLeft : LivenessAction.turnRight,
+        instruction: isLeft ? 'Boshni chapga buring' : 'Boshni o\'ngga buring',
+        icon: isLeft ? Icons.rotate_left_rounded : Icons.rotate_right_rounded,
+      ),
+      const _LivenessChallenge(
+        action: LivenessAction.smile,
+        instruction: 'Iltimos, jilmaying',
+        icon: Icons.sentiment_satisfied_alt_rounded,
+      ),
+    ];
+
+    _challengeIndex = -1; // Reset to "straighten face"
+    _livenessComplete = false;
+    _scanProgress = 0.0;
+    _faceLostTime = 0;
+  }
+
   String get _currentInstruction {
     if (!_faceDetected) return 'Yuzingizni doira ichiga joylang';
-    switch (_livenessStep) {
-      case _LivenessStep.straight:
-        return 'Kameraga to\'g\'ri qarang';
-      case _LivenessStep.blink:
-        return 'Iltimos, ko\'zingizni kiring (Blink)';
-      case _LivenessStep.left:
-        return 'Boshni chapga burang';
-      case _LivenessStep.right:
-        return 'Boshni o\'ngga burang';
-      case _LivenessStep.done:
-        return 'Ajoyib! Harakatlanmang...';
+    if (_challengeIndex == -1) return 'Kameraga to\'g\'ri qarang';
+    if (_livenessComplete) return 'Ajoyib! Harakatlanmang...';
+    if (_challengeIndex < _challenges.length) {
+      return _challenges[_challengeIndex].instruction;
     }
+    return 'Kutilmoqda...';
+  }
+
+  IconData get _currentChallengeIcon {
+    if (_livenessComplete) return Icons.check_circle_rounded;
+    if (!_faceDetected) return Icons.face_retouching_natural;
+    if (_challengeIndex == -1) return Icons.center_focus_strong_rounded;
+    if (_challengeIndex < _challenges.length) {
+      return _challenges[_challengeIndex].icon;
+    }
+    return Icons.info_outline_rounded;
   }
 
   // ─── Date picker ──────────────────────────────────────────────────────────
@@ -538,7 +626,9 @@ class _MyIdVerificationPageState extends State<MyIdVerificationPage>
             pulseAnim: _pulse,
             shimmerAnim: _shimmer,
             scanProgress: _scanProgress,
+            livenessComplete: _livenessComplete,
             instructionText: _currentInstruction,
+            challengeIcon: _currentChallengeIcon,
             onCancel: () {
               _stopCamera();
               setState(() => _step = _Step.input);
@@ -764,7 +854,9 @@ class _ScanStep extends StatelessWidget {
     required this.pulseAnim,
     required this.shimmerAnim,
     required this.scanProgress,
+    required this.livenessComplete,
     required this.instructionText,
+    required this.challengeIcon,
     required this.onCancel,
   });
 
@@ -777,7 +869,9 @@ class _ScanStep extends StatelessWidget {
   final Animation<double> pulseAnim;
   final Animation<double> shimmerAnim;
   final double scanProgress;
+  final bool livenessComplete;
   final String instructionText;
+  final IconData challengeIcon;
   final VoidCallback onCancel;
 
   @override
@@ -799,15 +893,6 @@ class _ScanStep extends StatelessWidget {
           child: Column(
             children: [
               SizedBox(height: 12.h),
-              Text(
-                instructionText,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: statusColor,
-                  fontSize: 15.sp,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
               if (hasError) ...[
                 SizedBox(height: 8.h),
                 Container(
@@ -876,6 +961,52 @@ class _ScanStep extends StatelessWidget {
               Padding(
                 padding: EdgeInsets.symmetric(horizontal: 32.w),
                 child: _ScanTips(),
+              ),
+              SizedBox(height: 12.h),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 24.w),
+                child: Container(
+                  width: double.infinity,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 16.w,
+                    vertical: 12.h,
+                  ),
+                  decoration: BoxDecoration(
+                    color: statusColor.withOpacity(0.14),
+                    borderRadius: BorderRadius.circular(16.r),
+                    border: Border.all(color: statusColor.withOpacity(0.35)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: EdgeInsets.all(8.r),
+                        decoration: BoxDecoration(
+                          color: statusColor.withOpacity(0.1),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          challengeIcon,
+                          color: statusColor,
+                          size: 24.sp,
+                        ),
+                      ),
+                      SizedBox(width: 12.w),
+                      Expanded(
+                        child: Text(
+                          instructionText,
+                          textAlign: TextAlign.left,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 16.sp,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
               SizedBox(height: 24.h),
 
@@ -1565,10 +1696,18 @@ class _ProgressPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (progress <= 0) return;
 
-    final rect = (Offset.zero & size).deflate(1.5);
+    final rect = (Offset.zero & size).deflate(2.0);
+    
+    // Draw background track
+    final trackPaint = Paint()
+      ..color = color.withValues(alpha: 0.1)
+      ..strokeWidth = 4.0
+      ..style = PaintingStyle.stroke;
+    canvas.drawOval(rect, trackPaint);
+
     final paint = Paint()
       ..color = color
-      ..strokeWidth = 4.0
+      ..strokeWidth = 5.0
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
 
@@ -1577,6 +1716,14 @@ class _ProgressPainter extends CustomPainter {
     final metrics = path.computeMetrics().first;
     final extract = metrics.extractPath(0, metrics.length * progress);
 
+    // Add a subtle glow to the progress arc
+    final glowPaint = Paint()
+      ..color = color.withValues(alpha: 0.3)
+      ..strokeWidth = 10.0
+      ..style = PaintingStyle.stroke
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+    canvas.drawPath(extract, glowPaint);
+    
     canvas.drawPath(extract, paint);
   }
 

@@ -10,6 +10,9 @@ class FaceOverlayPainter extends CustomPainter {
   final double ellipseWidthFactor;
   final double? ellipseHeightFactor;
 
+  final BoxFit fit;
+  final bool showLandmarks;
+
   FaceOverlayPainter({
     required this.faces,
     required this.imageSize,
@@ -17,6 +20,8 @@ class FaceOverlayPainter extends CustomPainter {
     this.isFrontCamera = true,
     this.ellipseWidthFactor = 0.75,
     this.ellipseHeightFactor,
+    this.fit = BoxFit.cover,
+    this.showLandmarks = true,
   });
 
   @override
@@ -291,48 +296,73 @@ class FaceOverlayPainter extends CustomPainter {
         paint.color = Colors.greenAccent; // Single good face = green
       }
 
-      canvas.drawRect(rect, paint);
+      // canvas.drawRect(rect, paint); // Removed bounding box as requested
 
-      // Draw landmarks
-      final dotPaint = Paint()
-        ..color = Colors.pinkAccent
-        ..style = PaintingStyle.fill;
+      // Draw landmarks with a subtle glow
+      if (showLandmarks) {
+        final dotPaint = Paint()
+          ..color = Colors.white.withValues(alpha: 0.8)
+          ..style = PaintingStyle.fill;
 
-      // 🔧 FIXED: Added missing { after for loop
-      for (final landmark in face.landmarks.values) {
-        final offset = _scaleOffset(landmark, size);
-        canvas.drawCircle(offset, 3, dotPaint);
+        final glowPaint = Paint()
+          ..color = Colors.cyanAccent.withValues(alpha: 0.4)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
+
+        for (final landmark in face.landmarks.values) {
+          final offset = _scaleOffset(landmark, size);
+          canvas.drawCircle(offset, 4, glowPaint);
+          canvas.drawCircle(offset, 2, dotPaint);
+        }
       }
     }
   }
 
   Rect _scaleRect(Rect rect, Size widgetSize) {
-    // Calculate scale factors preserving aspect ratio
+    // Calculate scale factors based on requested fit
     final double scaleX = widgetSize.width / imageSize.width;
     final double scaleY = widgetSize.height / imageSize.height;
-    final scale = math.min(scaleX, scaleY);
+    final scale = fit == BoxFit.cover 
+        ? math.max(scaleX, scaleY) 
+        : math.min(scaleX, scaleY);
 
     final offsetX = (widgetSize.width - imageSize.width * scale) / 2;
     final offsetY = (widgetSize.height - imageSize.height * scale) / 2;
 
+    final left = rect.left * scale + offsetX;
+    final top = rect.top * scale + offsetY;
+    final right = rect.right * scale + offsetX;
+    final bottom = rect.bottom * scale + offsetY;
+
+    if (!isFrontCamera) {
+      return Rect.fromLTRB(left, top, right, bottom);
+    }
+
+    // Mirror the overlay so it matches the front camera preview.
     return Rect.fromLTRB(
-      rect.left * scale + offsetX,
-      rect.top * scale + offsetY,
-      rect.right * scale + offsetX,
-      rect.bottom * scale + offsetY,
+      widgetSize.width - right,
+      top,
+      widgetSize.width - left,
+      bottom,
     );
   }
 
   Offset _scaleOffset(Offset offset, Size widgetSize) {
     final double scaleX = widgetSize.width / imageSize.width;
     final double scaleY = widgetSize.height / imageSize.height;
-    final scale = math.min(scaleX, scaleY);
+    final scale = fit == BoxFit.cover 
+        ? math.max(scaleX, scaleY) 
+        : math.min(scaleX, scaleY);
 
     final offsetX = (widgetSize.width - imageSize.width * scale) / 2;
-    // 🔧 FIXED: final offsetY = (was fin=)
     final offsetY = (widgetSize.height - imageSize.height * scale) / 2;
+    final dx = offset.dx * scale + offsetX;
+    final dy = offset.dy * scale + offsetY;
 
-    return Offset(offset.dx * scale + offsetX, offset.dy * scale + offsetY);
+    if (!isFrontCamera) {
+      return Offset(dx, dy);
+    }
+
+    return Offset(widgetSize.width - dx, dy);
   }
 
   @override
